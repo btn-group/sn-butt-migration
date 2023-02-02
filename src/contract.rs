@@ -1491,7 +1491,7 @@ mod tests {
         assert_eq!(
             handle_result.unwrap_err(),
             NotFound {
-                kind: "cw_secret_network_limit_orders::state::Order".to_string(),
+                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
                 backtrace: None
             }
         );
@@ -1930,7 +1930,7 @@ mod tests {
         assert_eq!(
             handle_result.unwrap_err(),
             NotFound {
-                kind: "cw_secret_network_limit_orders::state::Order".to_string(),
+                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
                 backtrace: None
             }
         );
@@ -3028,7 +3028,7 @@ mod tests {
         assert_eq!(
             res.unwrap_err(),
             NotFound {
-                kind: "cw_secret_network_limit_orders::state::Order".to_string(),
+                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
                 backtrace: None
             }
         );
@@ -3051,7 +3051,7 @@ mod tests {
         assert_eq!(
             res.unwrap_err(),
             NotFound {
-                kind: "cw_secret_network_limit_orders::state::Order".to_string(),
+                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
                 backtrace: None
             }
         );
