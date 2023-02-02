@@ -1,6 +1,6 @@
 use cosmwasm_schema::{export_schema, remove_schemas, schema_for};
-use cw_secret_network_limit_orders::msg::{HandleMsg, InitMsg, QueryMsg};
-use cw_secret_network_limit_orders::state::Config;
+use cw_secret_network_butt_migration::msg::{HandleMsg, InitMsg, QueryMsg};
+use cw_secret_network_butt_migration::state::Config;
 use std::env::current_dir;
 use std::fs::create_dir_all;
 
