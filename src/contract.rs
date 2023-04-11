@@ -45,10 +45,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
     msg: HandleMsg,
 ) -> StdResult<HandleResponse> {
     match msg {
-        HandleMsg::CancelOrder {
-            from_token_address,
-            position,
-        } => cancel_order(deps, &env, from_token_address, position.u128()),
+        HandleMsg::CancelOrder { position } => cancel_order(deps, &env, position.u128()),
         HandleMsg::Receive {
             from, amount, msg, ..
         } => receive(deps, env, from, amount, msg),
@@ -100,10 +97,7 @@ fn receive<S: Storage, A: Api, Q: Querier>(
         ReceiveMsg::SetExecutionFeeForOrder {} => {
             set_execution_fee_for_order(deps, &env, from, amount)
         }
-        ReceiveMsg::CreateOrder {
-            to_amount,
-            to_token,
-        } => create_order(deps, &env, from, amount, to_amount, to_token),
+        ReceiveMsg::CreateOrder { to } => create_order(deps, &env, from, amount, to),
     };
     pad_response(response)
 }
@@ -149,11 +143,8 @@ fn set_execution_fee_for_order<S: Storage, A: Api, Q: Querier>(
             "Execution fee already set for order.",
         ));
     }
-    if creator_order.cancelled {
-        return Err(StdError::generic_err("Order already cancelled."));
-    }
-    if creator_order.from_amount == creator_order.from_amount_filled {
-        return Err(StdError::generic_err("Order already filled."));
+    if creator_order.status != 0 {
+        return Err(StdError::generic_err("Order is not open."));
     }
 
     creator_order.execution_fee = Some(amount);
@@ -206,7 +197,6 @@ fn append_order<S: Storage>(
 fn cancel_order<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: &Env,
-    from_token_address: HumanAddr,
     position: u128,
 ) -> StdResult<HandleResponse> {
     let contract_canonical_address: CanonicalAddr =
@@ -216,45 +206,26 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
         &deps.api.canonical_address(&env.message.sender)?,
         position,
     )?;
-    validate_human_addr(
-        &creator_order.from_token,
-        &from_token_address,
-        "From token address does not match the order's from token.",
-    )?;
-    if creator_order.cancelled {
-        return Err(StdError::generic_err("Order already cancelled."));
-    }
-    if creator_order.from_amount == creator_order.from_amount_filled {
-        return Err(StdError::generic_err("Order already filled."));
+    if creator_order.status != 0 {
+        return Err(StdError::generic_err(
+            "Order is already filled or cancelled.",
+        ));
     }
 
-    let from_token_address_canonical: CanonicalAddr =
-        deps.api.canonical_address(&creator_order.from_token)?;
-    let mut from_registered_token: RegisteredToken =
-        read_registered_token(&deps.storage, &from_token_address_canonical).unwrap();
-    let unfilled_amount: Uint128 = (creator_order.from_amount - creator_order.from_amount_filled)?;
-
-    // Update from_registered_token balance
-    from_registered_token.sum_balance = (from_registered_token.sum_balance - unfilled_amount)?;
-    write_registered_token(
-        &mut deps.storage,
-        &from_token_address_canonical,
-        &from_registered_token,
-    )?;
-
+    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
     // Send refund to the creator
     let mut messages: Vec<CosmosMsg> = vec![];
     messages.push(snip20::transfer_msg(
         env.message.sender.clone(),
-        unfilled_amount,
+        creator_order.amount,
         None,
         BLOCK_SIZE,
-        from_registered_token.contract_hash,
-        from_registered_token.address,
+        config.butt.contract_hash,
+        config.butt.address,
     )?);
 
     // Update Txs
-    creator_order.cancelled = true;
+    creator_order.status = 2;
     update_creator_order_and_associated_contract_order(
         &mut deps.storage,
         &creator_order.creator,
@@ -262,19 +233,17 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
         &contract_canonical_address,
     )?;
 
-    // If order has an execution fee and it has not been spent, send it back to the user
+    // If order has an execution fee send it back to the user
     let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    if creator_order.from_amount_filled.is_zero() {
-        if let Some(execution_fee_unwrapped) = creator_order.execution_fee {
-            messages.push(snip20::transfer_msg(
-                env.message.sender.clone(),
-                execution_fee_unwrapped,
-                None,
-                BLOCK_SIZE,
-                config.sscrt.contract_hash,
-                config.sscrt.address,
-            )?);
-        }
+    if let Some(execution_fee_unwrapped) = creator_order.execution_fee {
+        messages.push(snip20::transfer_msg(
+            env.message.sender.clone(),
+            execution_fee_unwrapped,
+            None,
+            BLOCK_SIZE,
+            config.sscrt.contract_hash,
+            config.sscrt.address,
+        )?);
     }
 
     pad_response(Ok(HandleResponse {
@@ -284,31 +253,16 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
     }))
 }
 
+// activity (0 => open, 1 => filled, 2 => cancelled)
 fn create_order<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: &Env,
     from: HumanAddr,
-    from_amount: Uint128,
-    to_amount: Uint128,
-    to_token: HumanAddr,
+    amount: Uint128,
+    to: HumanAddr,
 ) -> StdResult<HandleResponse> {
-    let to_token_address_canonical = deps.api.canonical_address(&to_token)?;
-    let to_token_details: Option<RegisteredToken> =
-        read_registered_token(&deps.storage, &to_token_address_canonical);
-    if to_token_details.is_none() {
-        return Err(StdError::generic_err("To token is not registered."));
-    }
-
-    // Increase sum balance for from_token
-    let from_token_address_canonical = deps.api.canonical_address(&env.message.sender)?;
-    let mut from_token_details: RegisteredToken =
-        read_registered_token(&deps.storage, &from_token_address_canonical).unwrap();
-    from_token_details.sum_balance += from_amount;
-    write_registered_token(
-        &mut deps.storage,
-        &from_token_address_canonical,
-        &from_token_details,
-    )?;
+    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
+    authorize(vec![config.butt.address], &env.message.sender)?;
 
     // Store order
     let contract_address: CanonicalAddr = deps.api.canonical_address(&env.contract.address)?;
@@ -322,15 +276,10 @@ fn create_order<S: Storage, A: Api, Q: Querier>(
         position: Uint128(contract_order_position),
         execution_fee: None,
         other_storage_position: Uint128(creator_order_position),
-        from_token: env.message.sender.clone(),
-        to_token,
         creator: creator_address.clone(),
-        from_amount,
-        from_amount_filled: Uint128(0),
-        net_to_amount: to_amount,
-        net_to_amount_filled: Uint128(0),
-        cancelled: false,
-        fee: Uint128(0),
+        amount,
+        to,
+        status: 0,
         created_at_block_time: env.block.time,
         created_at_block_height: env.block.height,
     };
@@ -660,8 +609,7 @@ mod tests {
     // === HELPERS ===
     fn create_order_helper<S: Storage, A: Api, Q: Querier>(deps: &mut Extern<S, A, Q>) {
         let receive_msg = ReceiveMsg::CreateOrder {
-            to_amount: Uint128(MOCK_AMOUNT),
-            to_token: mock_token().address,
+            to: mock_token().address,
         };
         let handle_msg = HandleMsg::Receive {
             sender: mock_user_address(),
@@ -821,7 +769,7 @@ mod tests {
         // ==== when order does not have execution fee set already
         // ===== when order is cancelled
         creator_order.execution_fee = None;
-        creator_order.cancelled = true;
+        creator_order.status = 2;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &deps.api.canonical_address(&mock_user_address()).unwrap(),
@@ -836,11 +784,10 @@ mod tests {
         let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("Order already cancelled.")
+            StdError::generic_err("Order is not open.")
         );
         // ===== when order is filled
-        creator_order.cancelled = false;
-        creator_order.from_amount_filled = creator_order.from_amount;
+        creator_order.status = 1;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &deps.api.canonical_address(&mock_user_address()).unwrap(),
@@ -855,10 +802,10 @@ mod tests {
         let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("Order already filled.")
+            StdError::generic_err("Order is not open.")
         );
         // ===== when order is open
-        creator_order.from_amount_filled = Uint128(0);
+        creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &deps.api.canonical_address(&mock_user_address()).unwrap(),
@@ -938,7 +885,6 @@ mod tests {
 
         // = when order at position does not exist
         let mut handle_msg = HandleMsg::CancelOrder {
-            from_token_address: mock_token().address,
             position: Uint128(0),
         };
         let mut handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
@@ -954,16 +900,7 @@ mod tests {
 
         // = when order at position exists
         create_order_helper(&mut deps);
-        // == when token used to cancel doesn't match the from_token
-        handle_result = handle(&mut deps, env.clone(), handle_msg);
-        // == * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("From token address does not match the order's from token.")
-        );
-        // == when token used to cancel matches the from_token
         handle_msg = HandleMsg::CancelOrder {
-            from_token_address: mock_butt().address,
             position: Uint128(0),
         };
         // === when order is cancelled
@@ -973,7 +910,7 @@ mod tests {
             0,
         )
         .unwrap();
-        creator_order.cancelled = true;
+        creator_order.status = 2;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &creator_order.creator,
@@ -988,11 +925,10 @@ mod tests {
         handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("Order already cancelled.")
+            StdError::generic_err("Order is already filled or cancelled.")
         );
         // === when order is filled
-        creator_order.cancelled = false;
-        creator_order.from_amount_filled = creator_order.from_amount;
+        creator_order.status = 2;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &creator_order.creator,
@@ -1007,10 +943,10 @@ mod tests {
         handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("Order already filled.")
+            StdError::generic_err("Order is already filled or cancelled.")
         );
         // === when order can be cancelled
-        creator_order.from_amount_filled = Uint128(5);
+        creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &creator_order.creator,
@@ -1021,43 +957,18 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        let from_registered_token: RegisteredToken = read_registered_token(
-            &deps.storage,
-            &deps
-                .api
-                .canonical_address(&creator_order.from_token)
-                .unwrap(),
-        )
-        .unwrap();
-        let sum_balance_before_cancel: Uint128 = from_registered_token.sum_balance;
         handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        // === * it reduces the from token's sum_balance by the unfilled amount
-        let from_registered_token: RegisteredToken = read_registered_token(
-            &deps.storage,
-            &deps
-                .api
-                .canonical_address(&creator_order.from_token)
-                .unwrap(),
-        )
-        .unwrap();
-        let unfilled_amount: Uint128 =
-            (creator_order.from_amount - creator_order.from_amount_filled).unwrap();
-        assert_eq!(
-            from_registered_token.sum_balance,
-            (sum_balance_before_cancel - unfilled_amount).unwrap()
-        );
-
         // === * it sends the unfilled from token amount back to the creator
         let handle_result_unwrapped = handle_result.unwrap();
         assert_eq!(
             handle_result_unwrapped.messages,
             vec![snip20::transfer_msg(
                 deps.api.human_address(&creator_order.creator).unwrap(),
-                unfilled_amount,
+                creator_order.amount,
                 None,
                 BLOCK_SIZE,
-                from_registered_token.contract_hash.clone(),
-                from_registered_token.address.clone(),
+                mock_butt().contract_hash.clone(),
+                mock_butt().address.clone(),
             )
             .unwrap()]
         );
@@ -1097,13 +1008,12 @@ mod tests {
             creator_order.other_storage_position.u128(),
         )
         .unwrap();
-        assert_eq!(creator_order.cancelled, true);
-        assert_eq!(contract_order.cancelled, true);
+        assert_eq!(creator_order.status, 2);
+        assert_eq!(contract_order.status, 2);
 
         // ==== when order has an execution fee
         creator_order.execution_fee = Some(Uint128(1));
-        creator_order.cancelled = false;
-        creator_order.from_amount_filled = Uint128(999999999999);
+        creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &creator_order.creator,
@@ -1114,27 +1024,8 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-        // ===== when order is partially filled
-        // ===== * it does not send the execution fee back to the creator
-        handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![snip20::transfer_msg(
-                deps.api.human_address(&creator_order.creator).unwrap(),
-                (creator_order.from_amount - creator_order.from_amount_filled).unwrap(),
-                None,
-                BLOCK_SIZE,
-                from_registered_token.contract_hash.clone(),
-                from_registered_token.address.clone(),
-            )
-            .unwrap()]
-        );
-
-        // ===== when order has not been partially filled
-        creator_order.from_amount = Uint128(1);
         creator_order.execution_fee = Some(Uint128(1));
-        creator_order.cancelled = false;
-        creator_order.from_amount_filled = Uint128(0);
+        creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &creator_order.creator,
@@ -1145,7 +1036,6 @@ mod tests {
                 .unwrap(),
         )
         .unwrap();
-
         // ===== * it sends the execution fee back to the creator
         handle_result = handle(&mut deps, env.clone(), handle_msg);
         assert_eq!(
@@ -1153,11 +1043,11 @@ mod tests {
             vec![
                 snip20::transfer_msg(
                     deps.api.human_address(&creator_order.creator).unwrap(),
-                    (creator_order.from_amount - creator_order.from_amount_filled).unwrap(),
+                    creator_order.amount,
                     None,
                     BLOCK_SIZE,
-                    from_registered_token.contract_hash,
-                    from_registered_token.address,
+                    mock_butt().contract_hash,
+                    mock_butt().address,
                 )
                 .unwrap(),
                 snip20::transfer_msg(
@@ -1194,11 +1084,8 @@ mod tests {
     #[test]
     fn test_create_order() {
         let (_init_result, mut deps) = init_helper(true);
-
-        // = when to_token isn't registered
         let receive_msg = ReceiveMsg::CreateOrder {
-            to_amount: Uint128(MOCK_AMOUNT),
-            to_token: mock_user_address(),
+            to: mock_token().address,
         };
         let handle_msg = HandleMsg::Receive {
             sender: mock_user_address(),
@@ -1206,69 +1093,35 @@ mod tests {
             amount: Uint128(MOCK_AMOUNT),
             msg: to_binary(&receive_msg).unwrap(),
         };
-        // = * it raises an error
+
+        // = when token sent in isn't BUTT
         let handle_result = handle(
             &mut deps,
-            mock_env(mock_butt().address, &[]),
+            mock_env(mock_contract().address, &[]),
             handle_msg.clone(),
         );
+        // = * it raises an error
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("To token is not registered.")
+            StdError::Unauthorized { backtrace: None }
         );
 
-        // = when to_token is registered
-        let receive_msg = ReceiveMsg::CreateOrder {
-            to_amount: Uint128(MOCK_AMOUNT),
-            to_token: mock_token().address,
-        };
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_user_address(),
-            from: mock_user_address(),
-            amount: Uint128(MOCK_AMOUNT),
-            msg: to_binary(&receive_msg).unwrap(),
-        };
-
-        // == when order is created
-        // === * it increases the sum balance for the from_token
-        assert_eq!(
-            read_registered_token(
-                &deps.storage,
-                &deps.api.canonical_address(&mock_butt().address).unwrap()
-            )
-            .unwrap()
-            .sum_balance,
-            Uint128(0)
-        );
+        // = when token sent in is BUTT
         let handle_unwrapped = handle(
             &mut deps,
             mock_env(mock_butt().address, &[]),
             handle_msg.clone(),
         )
         .unwrap();
-        assert_eq!(
-            read_registered_token(
-                &deps.storage,
-                &deps.api.canonical_address(&mock_butt().address).unwrap()
-            )
-            .unwrap()
-            .sum_balance,
-            Uint128(MOCK_AMOUNT)
-        );
         // === * it sends the humanized creator order back as data
         let order: Order = Order {
             position: Uint128(0),
             execution_fee: None,
             other_storage_position: Uint128(0),
-            from_token: mock_butt().address,
-            to_token: mock_token().address,
             creator: deps.api.canonical_address(&mock_user_address()).unwrap(),
-            from_amount: Uint128(MOCK_AMOUNT),
-            from_amount_filled: Uint128(0),
-            net_to_amount: Uint128(MOCK_AMOUNT),
-            net_to_amount_filled: Uint128(0),
-            cancelled: false,
-            fee: Uint128(0),
+            amount: Uint128(MOCK_AMOUNT),
+            to: mock_token().address,
+            status: 0,
             created_at_block_time: mock_env(MOCK_ADMIN, &[]).block.time,
             created_at_block_height: mock_env(MOCK_ADMIN, &[]).block.height,
         };

@@ -11,13 +11,9 @@
         "cancel_order": {
           "type": "object",
           "required": [
-            "from_token_address",
             "position"
           ],
           "properties": {
-            "from_token_address": {
-              "$ref": "#/definitions/HumanAddr"
-            },
             "position": {
               "$ref": "#/definitions/Uint128"
             }

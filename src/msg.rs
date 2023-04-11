@@ -15,7 +15,6 @@ pub struct InitMsg {
 #[serde(rename_all = "snake_case")]
 pub enum HandleMsg {
     CancelOrder {
-        from_token_address: HumanAddr,
         position: Uint128,
     },
     Receive {
@@ -68,8 +67,5 @@ pub enum QueryMsg {
 #[serde(rename_all = "snake_case")]
 pub enum ReceiveMsg {
     SetExecutionFeeForOrder {},
-    CreateOrder {
-        to_amount: Uint128,
-        to_token: HumanAddr,
-    },
+    CreateOrder { to: HumanAddr },
 }
