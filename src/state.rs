@@ -6,19 +6,6 @@ use secret_toolkit::storage::{TypedStore, TypedStoreMut};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
-// For tracking cancelled and filled
-// activity (0 => cancelled, 1 => filled)
-#[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone, JsonSchema)]
-pub struct ActivityRecord {
-    pub order_position: Uint128,
-    pub position: Uint128,
-    pub activity: u8,
-    pub result_from_amount_filled: Option<Uint128>,
-    pub result_net_to_amount_filled: Option<Uint128>,
-    pub updated_at_block_height: u64,
-    pub updated_at_block_time: u64,
-}
-
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct Config {
     pub admin: HumanAddr,

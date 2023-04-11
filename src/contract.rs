@@ -1,12 +1,11 @@
 use crate::constants::{
-    BLOCK_SIZE, CONFIG_KEY, MOCK_AMOUNT, MOCK_BUTT_ADDRESS, MOCK_TOKEN_ADDRESS,
-    PREFIX_CANCEL_RECORDS, PREFIX_CANCEL_RECORDS_COUNT, PREFIX_FILL_RECORDS,
-    PREFIX_FILL_RECORDS_COUNT, PREFIX_ORDERS, PREFIX_ORDERS_COUNT,
+    BLOCK_SIZE, CONFIG_KEY, MOCK_AMOUNT, MOCK_BUTT_ADDRESS, MOCK_TOKEN_ADDRESS, PREFIX_ORDERS,
+    PREFIX_ORDERS_COUNT,
 };
 use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg};
 use crate::state::{
-    read_registered_token, write_registered_token, ActivityRecord, Config, HumanizedOrder, Order,
-    RegisteredToken, SecretContract,
+    read_registered_token, write_registered_token, Config, HumanizedOrder, Order, RegisteredToken,
+    SecretContract,
 };
 use crate::validations::{authorize, validate_human_addr, validate_uint128};
 use cosmwasm_std::{
@@ -71,28 +70,6 @@ pub fn query<S: Storage, A: Api, Q: Querier>(
     msg: QueryMsg,
 ) -> StdResult<Binary> {
     match msg {
-        QueryMsg::CancelRecords {
-            key,
-            page,
-            page_size,
-        } => activity_records(
-            deps,
-            key,
-            page.u128(),
-            page_size.u128(),
-            PREFIX_CANCEL_RECORDS,
-        ),
-        QueryMsg::FillRecords {
-            key,
-            page,
-            page_size,
-        } => activity_records(
-            deps,
-            key,
-            page.u128(),
-            page_size.u128(),
-            PREFIX_FILL_RECORDS,
-        ),
         QueryMsg::Config {} => {
             let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY)?;
             Ok(to_binary(&config)?)
@@ -129,35 +106,6 @@ fn receive<S: Storage, A: Api, Q: Querier>(
         } => create_order(deps, &env, from, amount, to_amount, to_token),
     };
     pad_response(response)
-}
-
-fn activity_records<S: Storage, A: Api, Q: Querier>(
-    deps: &Extern<S, A, Q>,
-    key: String,
-    page: u128,
-    page_size: u128,
-    storage_prefix: &[u8],
-) -> StdResult<Binary> {
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    // This is here to check the admin's viewing key
-    query_balance_of_token(deps, config.admin.clone(), config.butt, key)?;
-
-    let address = deps.api.canonical_address(&config.admin)?;
-    let (activity_records, total) =
-        get_activity_records(&deps.storage, &address, page, page_size, storage_prefix)?;
-    let result = QueryAnswer::ActivityRecords {
-        activity_records,
-        total: Some(Uint128(total)),
-    };
-    to_binary(&result)
-}
-
-fn prefix_activity_records_count(activity_records_storage_prefix: &[u8]) -> &[u8] {
-    if activity_records_storage_prefix == PREFIX_CANCEL_RECORDS {
-        PREFIX_CANCEL_RECORDS_COUNT
-    } else {
-        PREFIX_FILL_RECORDS_COUNT
-    }
 }
 
 fn set_execution_fee_for_order<S: Storage, A: Api, Q: Querier>(
@@ -221,35 +169,6 @@ fn set_execution_fee_for_order<S: Storage, A: Api, Q: Querier>(
         log: vec![],
         data: Some(to_binary(&creator_order.into_humanized(&deps.api)?)?),
     })
-}
-
-fn append_activity_record<S: Storage>(
-    store: &mut S,
-    activity_record: &ActivityRecord,
-    for_address: &CanonicalAddr,
-    storage_prefix: &[u8],
-) -> StdResult<()> {
-    let mut prefixed_store =
-        PrefixedStorage::multilevel(&[storage_prefix, for_address.as_slice()], store);
-    let mut activity_record_store = TypedStoreMut::<ActivityRecord, _>::attach(&mut prefixed_store);
-    activity_record_store.store(
-        &activity_record.position.u128().to_le_bytes(),
-        activity_record,
-    )?;
-    set_count(
-        store,
-        for_address,
-        prefix_activity_records_count(storage_prefix),
-        activity_record
-            .position
-            .u128()
-            .checked_add(1)
-            .ok_or_else(|| {
-                StdError::generic_err(
-                    "Reached implementation limit for the number of activity records per address.",
-                )
-            })?,
-    )
 }
 
 fn set_count<S: Storage>(
@@ -342,30 +261,9 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
         creator_order.clone(),
         &contract_canonical_address,
     )?;
-    // Create activity record
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    let admin_canonical_address: CanonicalAddr = deps.api.canonical_address(&config.admin)?;
-    let activity_record: ActivityRecord = ActivityRecord {
-        position: Uint128(storage_count(
-            &deps.storage,
-            &admin_canonical_address,
-            PREFIX_CANCEL_RECORDS_COUNT,
-        )?),
-        order_position: creator_order.other_storage_position,
-        activity: 0,
-        result_from_amount_filled: None,
-        result_net_to_amount_filled: None,
-        updated_at_block_height: env.block.height,
-        updated_at_block_time: env.block.time,
-    };
-    append_activity_record(
-        &mut deps.storage,
-        &activity_record,
-        &admin_canonical_address,
-        PREFIX_CANCEL_RECORDS,
-    )?;
 
     // If order has an execution fee and it has not been spent, send it back to the user
+    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
     if creator_order.from_amount_filled.is_zero() {
         if let Some(execution_fee_unwrapped) = creator_order.execution_fee {
             messages.push(snip20::transfer_msg(
@@ -447,32 +345,6 @@ fn create_order<S: Storage, A: Api, Q: Querier>(
         log: vec![],
         data: Some(to_binary(&order.into_humanized(&deps.api)?)?),
     })
-}
-
-fn get_activity_records<S: ReadonlyStorage>(
-    storage: &S,
-    for_address: &CanonicalAddr,
-    page: u128,
-    page_size: u128,
-    storage_prefix: &[u8],
-) -> StdResult<(Vec<ActivityRecord>, u128)> {
-    let total: u128 = storage_count(
-        storage,
-        for_address,
-        prefix_activity_records_count(storage_prefix),
-    )?;
-    let offset: u128 = page * page_size;
-    let end = total - offset;
-    let start = end.saturating_sub(page_size);
-    let store =
-        ReadonlyPrefixedStorage::multilevel(&[storage_prefix, for_address.as_slice()], storage);
-    let mut activity_records: Vec<ActivityRecord> = Vec::new();
-    let store = TypedStore::<ActivityRecord, _>::attach(&store);
-    for position in (start..end).rev() {
-        activity_records.push(store.load(&position.to_le_bytes())?);
-    }
-
-    Ok((activity_records, total))
 }
 
 fn get_orders<A: Api, S: ReadonlyStorage>(
@@ -1228,31 +1100,6 @@ mod tests {
         assert_eq!(creator_order.cancelled, true);
         assert_eq!(contract_order.cancelled, true);
 
-        // ===== * it creates an activity record
-        let (activity_records, total) = get_activity_records(
-            &deps.storage,
-            &deps
-                .api
-                .canonical_address(&HumanAddr::from(MOCK_ADMIN))
-                .unwrap(),
-            0,
-            50,
-            PREFIX_CANCEL_RECORDS,
-        )
-        .unwrap();
-        assert_eq!(total, 1);
-        assert_eq!(
-            activity_records[0],
-            ActivityRecord {
-                position: Uint128(0),
-                order_position: contract_order.position,
-                activity: 0,
-                result_from_amount_filled: None,
-                result_net_to_amount_filled: None,
-                updated_at_block_height: env.block.height.clone(),
-                updated_at_block_time: env.block.time
-            }
-        );
         // ==== when order has an execution fee
         creator_order.execution_fee = Some(Uint128(1));
         creator_order.cancelled = false;
@@ -1525,7 +1372,6 @@ mod tests {
                 assert_eq!(orders[1].position, Uint128(3));
                 assert_eq!(orders[2].position, Uint128(4));
             }
-            _ => panic!("unexpected"),
         };
     }
 
