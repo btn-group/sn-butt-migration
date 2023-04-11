@@ -1,12 +1,12 @@
-use crate::state::{ActivityRecord, Hop, HumanizedOrder, SecretContract};
+use crate::state::{ActivityRecord, HumanizedOrder, SecretContract};
 use cosmwasm_std::{Binary, HumanAddr, Uint128};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
 pub struct InitMsg {
     pub butt: SecretContract,
+    pub mount_doom: SecretContract,
     pub execution_fee: Uint128,
     pub sscrt: SecretContract,
 }
@@ -19,16 +19,11 @@ pub enum HandleMsg {
         position: Uint128,
     },
     FinalizeRoute {},
-    HandleFirstHop {
-        borrow_amount: Uint128,
-        hops: VecDeque<Hop>,
-        minimum_acceptable_amount: Option<Uint128>,
-    },
     Receive {
         sender: HumanAddr,
         from: HumanAddr,
         amount: Uint128,
-        msg: Option<Binary>,
+        msg: Binary,
     },
     RegisterTokens {
         tokens: Vec<SecretContract>,
@@ -40,8 +35,7 @@ pub enum HandleMsg {
         token_address: Option<HumanAddr>,
     },
     UpdateConfig {
-        addresses_allowed_to_fill: Option<Vec<HumanAddr>>,
-        execution_fee: Option<Uint128>,
+        execution_fee: Uint128,
     },
 }
 
@@ -92,9 +86,6 @@ pub enum ReceiveMsg {
     CreateOrder {
         to_amount: Uint128,
         to_token: HumanAddr,
-    },
-    FillOrder {
-        position: Uint128,
     },
 }
 
