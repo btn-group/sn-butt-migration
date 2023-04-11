@@ -234,7 +234,6 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
     )?;
 
     // If order has an execution fee send it back to the user
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
     if let Some(execution_fee_unwrapped) = creator_order.execution_fee {
         messages.push(snip20::transfer_msg(
             env.message.sender.clone(),
