@@ -5,9 +5,8 @@ use crate::constants::{
 };
 use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg};
 use crate::state::{
-    delete_route_state, read_registered_token, read_route_state, store_route_state,
-    write_registered_token, ActivityRecord, Config, Hop, HumanizedOrder, Order, RegisteredToken,
-    RouteState, SecretContract,
+    read_registered_token, write_registered_token, ActivityRecord, Config, HumanizedOrder, Order,
+    RegisteredToken, SecretContract,
 };
 use crate::validations::{authorize, validate_human_addr, validate_uint128};
 use cosmwasm_std::{
@@ -19,7 +18,6 @@ use cosmwasm_storage::{PrefixedStorage, ReadonlyPrefixedStorage};
 
 use secret_toolkit::snip20;
 use secret_toolkit::storage::{TypedStore, TypedStoreMut};
-use std::collections::VecDeque;
 
 pub fn init<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
@@ -52,7 +50,6 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             from_token_address,
             position,
         } => cancel_order(deps, &env, from_token_address, position.u128()),
-        HandleMsg::FinalizeRoute {} => finalize_route(deps, &env),
         HandleMsg::Receive {
             from, amount, msg, ..
         } => receive(deps, env, from, amount, msg),
@@ -450,32 +447,6 @@ fn create_order<S: Storage, A: Api, Q: Querier>(
         log: vec![],
         data: Some(to_binary(&order.into_humanized(&deps.api)?)?),
     })
-}
-
-fn finalize_route<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-) -> StdResult<HandleResponse> {
-    match read_route_state(&deps.storage)? {
-        Some(RouteState {
-            current_hop,
-            remaining_hops,
-            ..
-        }) => {
-            // this function is called only by the route creation function
-            // it is intended to always make sure that the route was completed successfully
-            // otherwise we revert the transaction
-            authorize(vec![env.contract.address.clone()], &env.message.sender)?;
-            if !remaining_hops.is_empty() || current_hop.is_some() {
-                return Err(StdError::generic_err(
-                    "Cannot finalize: route still contains hops.".to_string(),
-                ));
-            }
-            delete_route_state(&mut deps.storage);
-            Ok(HandleResponse::default())
-        }
-        None => Err(StdError::generic_err("No route to finalize")),
-    }
 }
 
 fn get_activity_records<S: ReadonlyStorage>(
@@ -1488,111 +1459,6 @@ mod tests {
             .unwrap(),
             order
         )
-    }
-
-    #[test]
-    fn test_finalize_route() {
-        let (_init_result, mut deps) = init_helper(true);
-        let env = mock_env(mock_user_address(), &[]);
-
-        // when route state does not exist
-        // * it raises an error
-        let handle_msg = HandleMsg::FinalizeRoute {};
-        let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("No route to finalize")
-        );
-
-        // when route state exists
-        // = when there are hops
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        hops.push_back(Hop {
-            from_token: mock_token(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(2)),
-        });
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_token(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(1)),
-            }),
-            remaining_hops: hops,
-            borrow_token: mock_token(),
-            borrow_amount: Uint128(1_000_000),
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: None,
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        // == when it isn't called by the contract
-        // == * it raises an error
-        let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::Unauthorized { backtrace: None }
-        );
-        // == when it's called by the contract
-        // == * it raises an error
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_contract().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err(format!("Cannot finalize: route still contains hops."))
-        );
-
-        // === when there are no hops but there is a current_hop
-        let hops: VecDeque<Hop> = VecDeque::new();
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_token(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(1)),
-            }),
-            remaining_hops: hops,
-            borrow_token: mock_token(),
-            borrow_amount: Uint128(1_000_000),
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: None,
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        // === * it raises an error
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_contract().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err(format!("Cannot finalize: route still contains hops."))
-        );
-        // ==== when there are no hops and no current_hop
-        let hops: VecDeque<Hop> = VecDeque::new();
-        let route_state: RouteState = RouteState {
-            current_hop: None,
-            remaining_hops: hops,
-            borrow_token: mock_token(),
-            borrow_amount: Uint128(1_000_000),
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: None,
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-
-        // ==== * it returns an Ok response
-        handle(
-            &mut deps,
-            mock_env(mock_contract().address, &[]),
-            handle_msg.clone(),
-        )
-        .unwrap();
-        // ==== * it deletes the route state
-        assert_eq!(read_route_state(&deps.storage).unwrap().is_none(), true);
     }
 
     #[test]

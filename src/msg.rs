@@ -18,7 +18,6 @@ pub enum HandleMsg {
         from_token_address: HumanAddr,
         position: Uint128,
     },
-    FinalizeRoute {},
     Receive {
         sender: HumanAddr,
         from: HumanAddr,

@@ -5,6 +5,7 @@
   "required": [
     "butt",
     "execution_fee",
+    "mount_doom",
     "sscrt"
   ],
   "properties": {
@@ -13,6 +14,9 @@
     },
     "execution_fee": {
       "$ref": "#/definitions/Uint128"
+    },
+    "mount_doom": {
+      "$ref": "#/definitions/SecretContract"
     },
     "sscrt": {
       "$ref": "#/definitions/SecretContract"

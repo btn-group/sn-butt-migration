@@ -3,19 +3,13 @@
   "title": "Config",
   "type": "object",
   "required": [
-    "addresses_allowed_to_fill",
     "admin",
     "butt",
     "execution_fee",
+    "mount_doom",
     "sscrt"
   ],
   "properties": {
-    "addresses_allowed_to_fill": {
-      "type": "array",
-      "items": {
-        "$ref": "#/definitions/HumanAddr"
-      }
-    },
     "admin": {
       "$ref": "#/definitions/HumanAddr"
     },
@@ -24,6 +18,9 @@
     },
     "execution_fee": {
       "$ref": "#/definitions/Uint128"
+    },
+    "mount_doom": {
+      "$ref": "#/definitions/SecretContract"
     },
     "sscrt": {
       "$ref": "#/definitions/SecretContract"

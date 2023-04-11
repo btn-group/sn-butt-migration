@@ -28,53 +28,6 @@
     {
       "type": "object",
       "required": [
-        "finalize_route"
-      ],
-      "properties": {
-        "finalize_route": {
-          "type": "object"
-        }
-      }
-    },
-    {
-      "type": "object",
-      "required": [
-        "handle_first_hop"
-      ],
-      "properties": {
-        "handle_first_hop": {
-          "type": "object",
-          "required": [
-            "borrow_amount",
-            "hops"
-          ],
-          "properties": {
-            "borrow_amount": {
-              "$ref": "#/definitions/Uint128"
-            },
-            "hops": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/Hop"
-              }
-            },
-            "minimum_acceptable_amount": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/Uint128"
-                },
-                {
-                  "type": "null"
-                }
-              ]
-            }
-          }
-        }
-      }
-    },
-    {
-      "type": "object",
-      "required": [
         "receive"
       ],
       "properties": {
@@ -83,6 +36,7 @@
           "required": [
             "amount",
             "from",
+            "msg",
             "sender"
           ],
           "properties": {
@@ -93,14 +47,7 @@
               "$ref": "#/definitions/HumanAddr"
             },
             "msg": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/Binary"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "$ref": "#/definitions/Binary"
             },
             "sender": {
               "$ref": "#/definitions/HumanAddr"
@@ -178,25 +125,12 @@
       "properties": {
         "update_config": {
           "type": "object",
+          "required": [
+            "execution_fee"
+          ],
           "properties": {
-            "addresses_allowed_to_fill": {
-              "type": [
-                "array",
-                "null"
-              ],
-              "items": {
-                "$ref": "#/definitions/HumanAddr"
-              }
-            },
             "execution_fee": {
-              "anyOf": [
-                {
-                  "$ref": "#/definitions/Uint128"
-                },
-                {
-                  "type": "null"
-                }
-              ]
+              "$ref": "#/definitions/Uint128"
             }
           }
         }
@@ -207,31 +141,6 @@
     "Binary": {
       "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>",
       "type": "string"
-    },
-    "Hop": {
-      "type": "object",
-      "required": [
-        "from_token",
-        "trade_smart_contract"
-      ],
-      "properties": {
-        "from_token": {
-          "$ref": "#/definitions/SecretContract"
-        },
-        "position": {
-          "anyOf": [
-            {
-              "$ref": "#/definitions/Uint128"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "trade_smart_contract": {
-          "$ref": "#/definitions/SecretContract"
-        }
-      }
     },
     "HumanAddr": {
       "type": "string"
