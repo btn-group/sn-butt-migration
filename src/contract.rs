@@ -482,6 +482,10 @@ fn rescue_tokens<S: Storage, A: Api, Q: Querier>(
     }
 
     if let Some(token_address_unwrapped) = token_address {
+        if token_address_unwrapped == config.butt.address {
+            return Err(StdError::generic_err("BUTT can't be rescued."));
+        }
+
         if let Some(key_unwrapped) = key {
             let registered_token: RegisteredToken = read_registered_token(
                 &deps.storage,
@@ -1376,12 +1380,25 @@ mod tests {
         );
 
         // == when only token address and key are specified
+        // === when token address is BUTT
+        // === * it raises an error
         let handle_msg = HandleMsg::RescueTokens {
             denom: None,
             key: Some(MOCK_VIEWING_KEY.to_string()),
             token_address: Some(mock_butt().address),
         };
-        // == * it sends the excess amount of token
+        let handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
+        assert_eq!(
+            handle_result.unwrap_err(),
+            StdError::generic_err("BUTT can't be rescued.")
+        );
+        // === when token address isn't BUTT
+        // === * it sends the excess amount of token
+        let handle_msg = HandleMsg::RescueTokens {
+            denom: None,
+            key: Some(MOCK_VIEWING_KEY.to_string()),
+            token_address: Some(mock_token().address),
+        };
         let handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
         let handle_result_unwrapped = handle_result.unwrap();
         assert_eq!(
@@ -1391,8 +1408,8 @@ mod tests {
                 Uint128(MOCK_AMOUNT),
                 None,
                 BLOCK_SIZE,
-                mock_butt().contract_hash,
-                mock_butt().address,
+                mock_token().contract_hash,
+                mock_token().address,
             )
             .unwrap()]
         );
