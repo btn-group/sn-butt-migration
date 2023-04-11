@@ -5,60 +5,6 @@
     {
       "type": "object",
       "required": [
-        "cancel_records"
-      ],
-      "properties": {
-        "cancel_records": {
-          "type": "object",
-          "required": [
-            "key",
-            "page",
-            "page_size"
-          ],
-          "properties": {
-            "key": {
-              "type": "string"
-            },
-            "page": {
-              "$ref": "#/definitions/Uint128"
-            },
-            "page_size": {
-              "$ref": "#/definitions/Uint128"
-            }
-          }
-        }
-      }
-    },
-    {
-      "type": "object",
-      "required": [
-        "fill_records"
-      ],
-      "properties": {
-        "fill_records": {
-          "type": "object",
-          "required": [
-            "key",
-            "page",
-            "page_size"
-          ],
-          "properties": {
-            "key": {
-              "type": "string"
-            },
-            "page": {
-              "$ref": "#/definitions/Uint128"
-            },
-            "page_size": {
-              "$ref": "#/definitions/Uint128"
-            }
-          }
-        }
-      }
-    },
-    {
-      "type": "object",
-      "required": [
         "config"
       ],
       "properties": {
