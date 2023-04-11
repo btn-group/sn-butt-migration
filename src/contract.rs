@@ -429,7 +429,6 @@ fn register_tokens<S: Storage, A: Api, Q: Querier>(
             let token_details: RegisteredToken = RegisteredToken {
                 address: token.address.clone(),
                 contract_hash: token.contract_hash.clone(),
-                sum_balance: Uint128(0),
             };
             write_registered_token(&mut deps.storage, &token_address_canonical, &token_details)?;
             messages.push(snip20::register_receive_msg(
@@ -498,18 +497,14 @@ fn rescue_tokens<S: Storage, A: Api, Q: Querier>(
                 },
                 key_unwrapped,
             )?;
-            let sum_balance: Uint128 = registered_token.sum_balance;
-            let difference: Uint128 = (balance - sum_balance)?;
-            if !difference.is_zero() {
-                messages.push(snip20::transfer_msg(
-                    config.admin,
-                    difference,
-                    None,
-                    BLOCK_SIZE,
-                    registered_token.contract_hash,
-                    registered_token.address,
-                )?)
-            }
+            messages.push(snip20::transfer_msg(
+                config.admin,
+                balance,
+                None,
+                BLOCK_SIZE,
+                registered_token.contract_hash,
+                registered_token.address,
+            )?)
         }
     }
 
@@ -1311,27 +1306,8 @@ mod tests {
         );
 
         // === context when tokens are registered
-        let mut registered_token: RegisteredToken = read_registered_token(
-            &deps.storage,
-            &deps.api.canonical_address(&mock_token().address).unwrap(),
-        )
-        .unwrap();
-        registered_token.sum_balance = Uint128(MOCK_AMOUNT);
-        write_registered_token(
-            &mut deps.storage,
-            &deps.api.canonical_address(&mock_token().address).unwrap(),
-            &registered_token,
-        )
-        .unwrap();
         let handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg);
         let handle_result_unwrapped = handle_result.unwrap();
-        // === * it does not change the registered token's sum_balance
-        let registered_token: RegisteredToken = read_registered_token(
-            &deps.storage,
-            &deps.api.canonical_address(&mock_token().address).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(registered_token.sum_balance, Uint128(MOCK_AMOUNT));
         // === * it sets the viewing key for the contract with the tokens
         assert_eq!(
             handle_result_unwrapped.messages,

@@ -25,7 +25,6 @@ pub struct SecretContract {
 pub struct RegisteredToken {
     pub address: HumanAddr,
     pub contract_hash: String,
-    pub sum_balance: Uint128,
 }
 
 pub fn read_registered_token<S: Storage>(
