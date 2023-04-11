@@ -3,7 +3,7 @@ use crate::constants::{
     PREFIX_CANCEL_RECORDS, PREFIX_CANCEL_RECORDS_COUNT, PREFIX_FILL_RECORDS,
     PREFIX_FILL_RECORDS_COUNT, PREFIX_ORDERS, PREFIX_ORDERS_COUNT,
 };
-use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg, Snip20Swap};
+use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg};
 use crate::state::{
     delete_route_state, read_registered_token, read_route_state, store_route_state,
     write_registered_token, ActivityRecord, Config, Hop, HumanizedOrder, Order, RegisteredToken,
@@ -13,10 +13,10 @@ use crate::validations::{authorize, validate_human_addr, validate_uint128};
 use cosmwasm_std::{
     from_binary, to_binary, Api, BalanceResponse, BankMsg, BankQuery, Binary, CanonicalAddr, Coin,
     CosmosMsg, Env, Extern, HandleResponse, HumanAddr, InitResponse, Querier, QueryRequest,
-    ReadonlyStorage, StdError, StdResult, Storage, Uint128, WasmMsg,
+    ReadonlyStorage, StdError, StdResult, Storage, Uint128,
 };
 use cosmwasm_storage::{PrefixedStorage, ReadonlyPrefixedStorage};
-use primitive_types::U256;
+
 use secret_toolkit::snip20;
 use secret_toolkit::storage::{TypedStore, TypedStoreMut};
 use std::collections::VecDeque;
@@ -28,9 +28,9 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<InitResponse> {
     let mut config_store = TypedStoreMut::attach(&mut deps.storage);
     let config: Config = Config {
-        addresses_allowed_to_fill: vec![env.message.sender.clone(), env.contract.address],
         admin: env.message.sender,
         butt: msg.butt,
+        mount_doom: msg.mount_doom,
         execution_fee: msg.execution_fee,
         sscrt: msg.sscrt,
     };
@@ -52,11 +52,6 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             from_token_address,
             position,
         } => cancel_order(deps, &env, from_token_address, position.u128()),
-        HandleMsg::HandleFirstHop {
-            borrow_amount,
-            hops,
-            minimum_acceptable_amount,
-        } => handle_first_hop(deps, &env, borrow_amount, hops, minimum_acceptable_amount),
         HandleMsg::FinalizeRoute {} => finalize_route(deps, &env),
         HandleMsg::Receive {
             from, amount, msg, ..
@@ -70,10 +65,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
             key,
             token_address,
         } => rescue_tokens(deps, &env, denom, key, token_address),
-        HandleMsg::UpdateConfig {
-            addresses_allowed_to_fill,
-            execution_fee,
-        } => update_config(deps, &env, addresses_allowed_to_fill, execution_fee),
+        HandleMsg::UpdateConfig { execution_fee } => update_config(deps, &env, execution_fee),
     }
 }
 
@@ -127,24 +119,17 @@ fn receive<S: Storage, A: Api, Q: Querier>(
     env: Env,
     from: HumanAddr,
     amount: Uint128,
-    msg: Option<Binary>,
+    msg: Binary,
 ) -> StdResult<HandleResponse> {
-    let response = if let Some(msg_unwrapped) = msg {
-        let msg: ReceiveMsg = from_binary(&msg_unwrapped)?;
-        match msg {
-            ReceiveMsg::SetExecutionFeeForOrder {} => {
-                set_execution_fee_for_order(deps, &env, from, amount)
-            }
-            ReceiveMsg::CreateOrder {
-                to_amount,
-                to_token,
-            } => create_order(deps, &env, from, amount, to_amount, to_token),
-            ReceiveMsg::FillOrder { position } => {
-                fill_order(deps, &env, from, amount, position.u128())
-            }
+    let msg: ReceiveMsg = from_binary(&msg)?;
+    let response = match msg {
+        ReceiveMsg::SetExecutionFeeForOrder {} => {
+            set_execution_fee_for_order(deps, &env, from, amount)
         }
-    } else {
-        handle_hop(deps, &env, from, amount)
+        ReceiveMsg::CreateOrder {
+            to_amount,
+            to_token,
+        } => create_order(deps, &env, from, amount, to_amount, to_token),
     };
     pad_response(response)
 }
@@ -467,150 +452,6 @@ fn create_order<S: Storage, A: Api, Q: Querier>(
     })
 }
 
-fn fill_order<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-    from: HumanAddr,
-    amount: Uint128,
-    position: u128,
-) -> StdResult<HandleResponse> {
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    authorize(config.addresses_allowed_to_fill, &from)?;
-    if amount.is_zero() {
-        return Err(StdError::generic_err("Amount must be greater than zero."));
-    }
-
-    let contract_canonical_address: CanonicalAddr =
-        deps.api.canonical_address(&env.contract.address)?;
-    let contract_order = order_at_position(&deps.storage, &contract_canonical_address, position)?;
-    let creator_order_position: Uint128 = contract_order.other_storage_position;
-    let mut creator_order = contract_order;
-    creator_order.position = creator_order_position;
-    creator_order.other_storage_position = Uint128(position);
-    // Check the token is the same at the to_token
-    validate_human_addr(
-        &creator_order.to_token,
-        &env.message.sender,
-        "To token does not match the token sent in.",
-    )?;
-    // Check the amount + filled amount is less than or equal to amount
-    if creator_order.cancelled {
-        return Err(StdError::generic_err("Order already cancelled."));
-    }
-    let unfilled_amount: Uint128 =
-        (creator_order.net_to_amount - creator_order.net_to_amount_filled)?;
-    if amount > unfilled_amount {
-        return Err(StdError::generic_err(
-            "Amount is greater than unfilled amount.",
-        ));
-    }
-
-    let mut address_to_send_execution_fee_to: Option<HumanAddr> = None;
-    if creator_order.from_amount_filled.is_zero() && creator_order.execution_fee.is_some() {
-        address_to_send_execution_fee_to = match read_route_state(&deps.storage)? {
-            Some(RouteState { initiator, .. }) => Some(initiator),
-            None => Some(from.clone()),
-        }
-    }
-    // Update net_to_amount_filled and from_amount_filled
-    creator_order.net_to_amount_filled += amount;
-    let from_filled_amount: Uint128 =
-        if creator_order.net_to_amount_filled == creator_order.net_to_amount {
-            (creator_order.from_amount - creator_order.from_amount_filled)?
-        } else {
-            Uint128::from(
-                (U256::from(creator_order.from_amount.u128()) * U256::from(amount.u128())
-                    / U256::from(creator_order.net_to_amount.u128()))
-                .as_u128(),
-            )
-        };
-    creator_order.from_amount_filled += from_filled_amount;
-    update_creator_order_and_associated_contract_order(
-        &mut deps.storage,
-        &creator_order.creator,
-        creator_order.clone(),
-        &contract_canonical_address,
-    )?;
-
-    // Send from token to admin
-    // Send to token to creator
-    let mut from_registered_token: RegisteredToken = read_registered_token(
-        &deps.storage,
-        &deps.api.canonical_address(&creator_order.from_token)?,
-    )
-    .unwrap();
-    let to_registered_token: RegisteredToken = read_registered_token(
-        &deps.storage,
-        &deps.api.canonical_address(&creator_order.to_token)?,
-    )
-    .unwrap();
-    let mut messages: Vec<CosmosMsg> = vec![
-        snip20::send_msg(
-            from,
-            from_filled_amount,
-            None,
-            None,
-            BLOCK_SIZE,
-            from_registered_token.contract_hash.clone(),
-            from_registered_token.address.clone(),
-        )?,
-        snip20::transfer_msg(
-            deps.api.human_address(&creator_order.creator)?,
-            amount,
-            None,
-            BLOCK_SIZE,
-            to_registered_token.contract_hash,
-            to_registered_token.address,
-        )?,
-    ];
-    if let Some(address_to_send_execution_fee_to_unwrapped) = address_to_send_execution_fee_to {
-        messages.push(snip20::transfer_msg(
-            address_to_send_execution_fee_to_unwrapped,
-            creator_order.execution_fee.unwrap(),
-            None,
-            BLOCK_SIZE,
-            config.sscrt.contract_hash,
-            config.sscrt.address,
-        )?)
-    }
-
-    // Update from_token balance
-    from_registered_token.sum_balance = (from_registered_token.sum_balance - from_filled_amount)?;
-    write_registered_token(
-        &mut deps.storage,
-        &deps.api.canonical_address(&from_registered_token.address)?,
-        &from_registered_token,
-    )?;
-
-    // Create activity record
-    let admin_canonical_address: CanonicalAddr = deps.api.canonical_address(&config.admin)?;
-    let activity_record: ActivityRecord = ActivityRecord {
-        position: Uint128(storage_count(
-            &deps.storage,
-            &admin_canonical_address,
-            PREFIX_FILL_RECORDS_COUNT,
-        )?),
-        order_position: creator_order.other_storage_position,
-        activity: 1,
-        result_from_amount_filled: Some(creator_order.from_amount_filled),
-        result_net_to_amount_filled: Some(creator_order.net_to_amount_filled),
-        updated_at_block_height: env.block.height,
-        updated_at_block_time: env.block.time,
-    };
-    append_activity_record(
-        &mut deps.storage,
-        &activity_record,
-        &admin_canonical_address,
-        PREFIX_FILL_RECORDS,
-    )?;
-
-    Ok(HandleResponse {
-        messages,
-        log: vec![],
-        data: None,
-    })
-}
-
 fn finalize_route<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: &Env,
@@ -683,207 +524,6 @@ fn get_orders<A: Api, S: ReadonlyStorage>(
     }
 
     Ok((orders, total))
-}
-
-fn handle_first_hop<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-    borrow_amount: Uint128,
-    mut hops: VecDeque<Hop>,
-    minimum_acceptable_amount: Option<Uint128>,
-) -> StdResult<HandleResponse> {
-    // This is the first msg from the user, with the entire route details
-    // 1. save the remaining route to state (e.g. if the route is X/Y -> Y/Z -> Z->W then save Y/Z -> Z/W to state)
-    // 2. send `amount` X to pair X/Y
-    // 3. call FinalizeRoute to make sure everything went ok, otherwise revert the tx
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    authorize(config.addresses_allowed_to_fill, &env.message.sender)?;
-    if hops.len() != 2 {
-        return Err(StdError::generic_err("Route must be 2 hops."));
-    }
-
-    // Figure out who to send excess to
-    // If it's two limit orders, it's the creator of the order with the latest position
-    // Otherwise, it's the initiator
-    let mut send_excess_to: HumanAddr = env.message.sender.clone();
-    let hop_one = hops.get(0).unwrap();
-    let hop_two = hops.get(1).unwrap();
-    if hop_one.position.is_some()
-        && hop_two.position.is_some()
-        && hop_one.trade_smart_contract.address == env.contract.address
-        && hop_two.trade_smart_contract.address == env.contract.address
-    {
-        let order_one: Order = order_at_position(
-            &deps.storage,
-            &deps.api.canonical_address(&env.contract.address)?,
-            hop_one.position.unwrap().u128(),
-        )?;
-        let order_two: Order = order_at_position(
-            &deps.storage,
-            &deps.api.canonical_address(&env.contract.address)?,
-            hop_two.position.unwrap().u128(),
-        )?;
-        send_excess_to = if order_one.position > order_two.position {
-            deps.api.human_address(&order_one.creator)?
-        } else {
-            deps.api.human_address(&order_two.creator)?
-        }
-    }
-
-    // unwrap is cool because `hops.len() == 2`
-    let first_hop: Hop = hops.pop_front().unwrap();
-    let route_state: RouteState = RouteState {
-        current_hop: Some(first_hop.clone()),
-        remaining_hops: hops,
-        borrow_amount,
-        borrow_token: first_hop.from_token.clone(),
-        initiator: env.message.sender.clone(),
-        minimum_acceptable_amount,
-        send_excess_to,
-    };
-    store_route_state(&mut deps.storage, &route_state)?;
-    let mut msgs = vec![snip20::send_msg(
-        first_hop.trade_smart_contract.address.clone(),
-        borrow_amount,
-        Some(swap_msg(
-            env.contract.address.clone(),
-            first_hop.position.as_ref(),
-        )?),
-        None,
-        BLOCK_SIZE,
-        first_hop.from_token.contract_hash,
-        first_hop.from_token.address,
-    )?];
-
-    msgs.push(
-        // finalize the route at the end, to make sure the route was completed successfully
-        CosmosMsg::Wasm(WasmMsg::Execute {
-            contract_addr: env.contract.address.clone(),
-            callback_code_hash: env.contract_code_hash.clone(),
-            msg: to_binary(&HandleMsg::FinalizeRoute {})?,
-            send: vec![],
-        }),
-    );
-
-    Ok(HandleResponse {
-        messages: msgs,
-        log: vec![],
-        data: None,
-    })
-}
-
-fn handle_hop<S: Storage, A: Api, Q: Querier>(
-    deps: &mut Extern<S, A, Q>,
-    env: &Env,
-    from: HumanAddr,
-    mut amount: Uint128,
-) -> StdResult<HandleResponse> {
-    match read_route_state(&deps.storage)? {
-        Some(RouteState {
-            current_hop,
-            remaining_hops: mut hops,
-            borrow_amount,
-            borrow_token,
-            minimum_acceptable_amount,
-            initiator,
-            send_excess_to,
-        }) => {
-            validate_human_addr(
-                &current_hop.unwrap().trade_smart_contract.address,
-                &from,
-                "Route called from wrong trade smart contract.",
-            )?;
-
-            let mut messages = vec![];
-            let popped_hop: Option<Hop> = hops.pop_front();
-            if let Some(popped_hop_unwrapped) = popped_hop.clone() {
-                let next_hop: Hop = popped_hop_unwrapped;
-                validate_human_addr(
-                    &next_hop.from_token.address,
-                    &env.message.sender,
-                    "Route called by wrong token.",
-                )?;
-
-                // if the next hop is this contract
-                // check that the amount is less than or equal to that order's unfilled amount
-                // only send in the unfilled amount
-                // we can rescue the dust later when worthwhile while making gas more predictable
-                if next_hop.trade_smart_contract.address == env.contract.address {
-                    let next_trade_order = order_at_position(
-                        &deps.storage,
-                        &deps.api.canonical_address(&env.contract.address)?,
-                        next_hop.position.unwrap().u128(),
-                    )?;
-                    let unfilled_amount =
-                        (next_trade_order.net_to_amount - next_trade_order.net_to_amount_filled)?;
-                    if amount.gt(&unfilled_amount) {
-                        amount = unfilled_amount
-                    }
-                }
-                messages.push(snip20::send_msg(
-                    next_hop.trade_smart_contract.address.clone(),
-                    amount,
-                    Some(swap_msg(
-                        env.contract.address.clone(),
-                        next_hop.position.as_ref(),
-                    )?),
-                    None,
-                    BLOCK_SIZE,
-                    next_hop.from_token.contract_hash,
-                    next_hop.from_token.address,
-                )?);
-            } else {
-                validate_human_addr(
-                    &borrow_token.address,
-                    &env.message.sender,
-                    "Route called by wrong token.",
-                )?;
-                if amount.lt(&borrow_amount) {
-                    return Err(StdError::generic_err(
-                        "Operation fell short of borrow_amount.",
-                    ));
-                }
-                if let Some(minimum_acceptable_amount_unwrapped) = minimum_acceptable_amount {
-                    if amount.lt(&minimum_acceptable_amount_unwrapped) {
-                        return Err(StdError::generic_err(
-                            "Operation fell short of minimum_acceptable_amount.",
-                        ));
-                    }
-                }
-
-                // Send excess
-                if amount.gt(&borrow_amount) {
-                    messages.push(snip20::transfer_msg(
-                        send_excess_to.clone(),
-                        (amount - borrow_amount).unwrap(),
-                        None,
-                        BLOCK_SIZE,
-                        borrow_token.contract_hash.clone(),
-                        borrow_token.address.clone(),
-                    )?);
-                }
-            }
-            store_route_state(
-                &mut deps.storage,
-                &RouteState {
-                    current_hop: popped_hop,
-                    remaining_hops: hops,
-                    borrow_amount,
-                    borrow_token,
-                    initiator,
-                    minimum_acceptable_amount,
-                    send_excess_to,
-                },
-            )?;
-
-            Ok(HandleResponse {
-                messages,
-                log: vec![],
-                data: None,
-            })
-        }
-        None => Err(StdError::generic_err("cannot find route")),
-    }
 }
 
 fn order_at_position<S: Storage>(
@@ -1115,52 +755,16 @@ fn storage_count<S: ReadonlyStorage>(
     Ok(position.unwrap_or(0))
 }
 
-fn swap_msg(contract_address: HumanAddr, position: Option<&Uint128>) -> StdResult<Binary> {
-    let swap_msg = if let Some(position_unwrapped) = position {
-        to_binary(&ReceiveMsg::FillOrder {
-            position: *position_unwrapped,
-        })?
-    } else {
-        to_binary(&Snip20Swap::Swap {
-            // set expected_return to None because we don't care about slippage mid-route
-            expected_return: None,
-            // set the recepient of the swap to be this contract (the router)
-            to: Some(contract_address),
-        })?
-    };
-    Ok(swap_msg)
-}
-
 fn update_config<S: Storage, A: Api, Q: Querier>(
     deps: &mut Extern<S, A, Q>,
     env: &Env,
-    addresses_allowed_to_fill: Option<Vec<HumanAddr>>,
-    execution_fee: Option<Uint128>,
+    execution_fee: Uint128,
 ) -> StdResult<HandleResponse> {
     let mut config_store = TypedStoreMut::attach(&mut deps.storage);
     let mut config: Config = config_store.load(CONFIG_KEY).unwrap();
     authorize(vec![config.admin.clone()], &env.message.sender)?;
 
-    if let Some(addresses_allowed_to_fill_unwrapped) = addresses_allowed_to_fill {
-        config.addresses_allowed_to_fill = addresses_allowed_to_fill_unwrapped;
-        if !config
-            .addresses_allowed_to_fill
-            .contains(&env.contract.address)
-        {
-            config
-                .addresses_allowed_to_fill
-                .push(env.contract.address.clone())
-        }
-        if !config
-            .addresses_allowed_to_fill
-            .contains(&config.admin.clone())
-        {
-            config.addresses_allowed_to_fill.push(config.admin.clone())
-        }
-    }
-    if let Some(execution_fee_unwrapped) = execution_fee {
-        config.execution_fee = execution_fee_unwrapped;
-    }
+    config.execution_fee = execution_fee;
     config_store.store(CONFIG_KEY, &config)?;
 
     Ok(HandleResponse {
@@ -1206,6 +810,7 @@ mod tests {
     use cosmwasm_std::StdError::NotFound;
 
     pub const MOCK_ADMIN: &str = "admin";
+    pub const MOCK_MOUNT_DOOM_ADDRESS: &str = "mock-mount-doom-contract-hash-address";
     pub const MOCK_VIEWING_KEY: &str = "DELIGHTFUL";
     pub const MOCK_SSCRT_ADDRESS: &str = "mock-sscrt-address";
 
@@ -1219,7 +824,7 @@ mod tests {
             sender: mock_user_address(),
             from: mock_user_address(),
             amount: Uint128(MOCK_AMOUNT),
-            msg: Some(to_binary(&receive_msg).unwrap()),
+            msg: to_binary(&receive_msg).unwrap(),
         };
         handle(deps, mock_env(mock_butt().address, &[]), handle_msg.clone()).unwrap();
     }
@@ -1235,6 +840,7 @@ mod tests {
         let msg = InitMsg {
             butt: mock_butt(),
             execution_fee: mock_execution_fee(),
+            mount_doom: mock_mount_doom(),
             sscrt: mock_sscrt(),
         };
         let init_result = init(&mut deps, env.clone(), msg);
@@ -1267,6 +873,13 @@ mod tests {
         Uint128(5_555)
     }
 
+    fn mock_mount_doom() -> SecretContract {
+        SecretContract {
+            address: HumanAddr::from(MOCK_MOUNT_DOOM_ADDRESS),
+            contract_hash: "mock-mount-doom-contract-hash".to_string(),
+        }
+    }
+
     fn mock_sscrt() -> SecretContract {
         SecretContract {
             address: HumanAddr::from(MOCK_SSCRT_ADDRESS),
@@ -1297,7 +910,7 @@ mod tests {
             sender: mock_user_address(),
             from: mock_user_address(),
             amount: Uint128(1),
-            msg: Some(to_binary(&receive_msg).unwrap()),
+            msg: to_binary(&receive_msg).unwrap(),
         };
         let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         // * it raises an error
@@ -1320,7 +933,7 @@ mod tests {
             sender: mock_user_address(),
             from: mock_user_address(),
             amount: mock_execution_fee(),
-            msg: Some(to_binary(&receive_msg).unwrap()),
+            msg: to_binary(&receive_msg).unwrap(),
         };
         let handle_result = handle(&mut deps, env.clone(), handle_msg);
         // == when user does not have any orders
@@ -1355,7 +968,7 @@ mod tests {
             sender: mock_user_address(),
             from: mock_user_address(),
             amount: mock_execution_fee(),
-            msg: Some(to_binary(&receive_msg).unwrap()),
+            msg: to_binary(&receive_msg).unwrap(),
         };
         let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
@@ -1750,13 +1363,10 @@ mod tests {
         let value: Config = from_binary(&res).unwrap();
         assert_eq!(
             Config {
-                addresses_allowed_to_fill: vec![
-                    HumanAddr::from(MOCK_ADMIN),
-                    mock_contract().address
-                ],
                 admin: HumanAddr::from(MOCK_ADMIN),
                 butt: mock_butt(),
                 execution_fee: mock_execution_fee(),
+                mount_doom: mock_mount_doom(),
                 sscrt: mock_sscrt(),
             },
             value
@@ -1776,7 +1386,7 @@ mod tests {
             sender: mock_user_address(),
             from: mock_user_address(),
             amount: Uint128(MOCK_AMOUNT),
-            msg: Some(to_binary(&receive_msg).unwrap()),
+            msg: to_binary(&receive_msg).unwrap(),
         };
         // = * it raises an error
         let handle_result = handle(
@@ -1798,7 +1408,7 @@ mod tests {
             sender: mock_user_address(),
             from: mock_user_address(),
             amount: Uint128(MOCK_AMOUNT),
-            msg: Some(to_binary(&receive_msg).unwrap()),
+            msg: to_binary(&receive_msg).unwrap(),
         };
 
         // == when order is created
@@ -1878,429 +1488,6 @@ mod tests {
             .unwrap(),
             order
         )
-    }
-
-    #[test]
-    fn test_fill_order() {
-        let (_init_result, mut deps) = init_helper(true);
-        let env = mock_env(mock_butt().address, &[]);
-
-        // when called by a non-admin
-        let receive_msg = ReceiveMsg::FillOrder {
-            position: Uint128(0),
-        };
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_user_address(),
-            from: mock_user_address(),
-            amount: Uint128(MOCK_AMOUNT),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        // * it raises an error
-        let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::Unauthorized { backtrace: None }
-        );
-
-        // when called by an address that's allowed
-        let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-        // = when amount sent in is zero
-        let handle_msg = HandleMsg::Receive {
-            sender: config.admin.clone(),
-            from: env.contract.address.clone(),
-            amount: Uint128(0),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        let handle_result = handle(&mut deps, env.clone(), handle_msg);
-        // = * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Amount must be greater than zero.")
-        );
-        // = when amount sent in is positive
-        let handle_msg = HandleMsg::Receive {
-            sender: config.admin.clone(),
-            from: config.admin.clone(),
-            amount: Uint128(1),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        // == when order does not exist
-        let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        // == * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            NotFound {
-                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
-                backtrace: None
-            }
-        );
-        // == when order exists
-        create_order_helper(&mut deps);
-        // === when to_token does not match the token sent in
-        let handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
-        // === * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("To token does not match the token sent in.")
-        );
-        // === when to token matches the token sent in
-        // ==== when order is cancelled
-        let mut creator_order = order_at_position(
-            &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
-            0,
-        )
-        .unwrap();
-        creator_order.cancelled = true;
-        update_creator_order_and_associated_contract_order(
-            &mut deps.storage,
-            &creator_order.creator,
-            creator_order.clone(),
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-        )
-        .unwrap();
-
-        // ==== * it raises an error
-        let handle_result = handle(&mut deps, mock_env(mock_token().address, &[]), handle_msg);
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Order already cancelled.")
-        );
-        // ==== when order is not cancelled
-        creator_order.cancelled = false;
-        update_creator_order_and_associated_contract_order(
-            &mut deps.storage,
-            &creator_order.creator,
-            creator_order.clone(),
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-        )
-        .unwrap();
-
-        // ===== when amount sent in is greater than unfilled amount
-        let handle_msg = HandleMsg::Receive {
-            sender: config.admin.clone(),
-            from: config.admin.clone(),
-            amount: Uint128(MOCK_AMOUNT + 1),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        // ===== * it raises an error
-        let handle_result = handle(&mut deps, mock_env(mock_token().address, &[]), handle_msg);
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Amount is greater than unfilled amount.")
-        );
-
-        // ===== when amount sent in is less than or equal to the net unfilled to amount
-        let handle_msg = HandleMsg::Receive {
-            sender: config.admin.clone(),
-            from: config.admin.clone(),
-            amount: Uint128(MOCK_AMOUNT / 2),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        // ===== * it updates the from amount filled for both orders
-        // ===== * it updates the net to amount filled
-        let mut creator_order = order_at_position(
-            &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
-            0,
-        )
-        .unwrap();
-        let contract_order = order_at_position(
-            &mut deps.storage,
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-            creator_order.other_storage_position.u128(),
-        )
-        .unwrap();
-        assert_eq!(
-            creator_order.from_amount_filled,
-            creator_order
-                .from_amount
-                .multiply_ratio(Uint128(1), Uint128(2))
-        );
-        assert_eq!(
-            contract_order.from_amount_filled,
-            contract_order
-                .from_amount
-                .multiply_ratio(Uint128(1), Uint128(2))
-        );
-        assert_eq!(
-            creator_order.net_to_amount_filled,
-            creator_order
-                .net_to_amount
-                .multiply_ratio(Uint128(1), Uint128(2))
-        );
-        assert_eq!(
-            contract_order.net_to_amount_filled,
-            contract_order
-                .net_to_amount
-                .multiply_ratio(Uint128(1), Uint128(2))
-        );
-
-        // ===== * it sends the correct ratio of the from_token to the admin
-        // ===== * it sends the amount to the creator
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![
-                snip20::send_msg(
-                    config.admin.clone(),
-                    Uint128(MOCK_AMOUNT / 2),
-                    None,
-                    None,
-                    BLOCK_SIZE,
-                    mock_butt().contract_hash,
-                    mock_butt().address,
-                )
-                .unwrap(),
-                snip20::transfer_msg(
-                    mock_user_address(),
-                    Uint128(MOCK_AMOUNT / 2),
-                    None,
-                    BLOCK_SIZE,
-                    mock_token().contract_hash,
-                    mock_token().address,
-                )
-                .unwrap(),
-            ]
-        );
-
-        // ===== * it updates the from tokens sum balance
-        let from_registered_token: RegisteredToken = read_registered_token(
-            &deps.storage,
-            &deps
-                .api
-                .canonical_address(&creator_order.from_token)
-                .unwrap(),
-        )
-        .unwrap();
-        assert_eq!(
-            from_registered_token.sum_balance,
-            creator_order
-                .net_to_amount
-                .multiply_ratio(Uint128(1), Uint128(2))
-        );
-        // ===== * it does not update the to tokens sum balance
-        let to_registered_token: RegisteredToken = read_registered_token(
-            &deps.storage,
-            &deps.api.canonical_address(&creator_order.to_token).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(to_registered_token.sum_balance, Uint128(0));
-        // ===== * it creates an activity record
-        let res = query(
-            &deps,
-            QueryMsg::FillRecords {
-                key: MOCK_VIEWING_KEY.to_string(),
-                page: Uint128(0),
-                page_size: Uint128(50),
-            },
-        )
-        .unwrap();
-        let query_answer: QueryAnswer = from_binary(&res).unwrap();
-        match query_answer {
-            QueryAnswer::ActivityRecords {
-                activity_records,
-                total,
-            } => {
-                assert_eq!(total, Some(Uint128(1)));
-                assert_eq!(
-                    activity_records[0],
-                    ActivityRecord {
-                        position: Uint128(0),
-                        order_position: contract_order.position,
-                        activity: 1,
-                        result_from_amount_filled: Some(creator_order.from_amount_filled),
-                        result_net_to_amount_filled: Some(creator_order.net_to_amount_filled),
-                        updated_at_block_height: env.block.height.clone(),
-                        updated_at_block_time: env.block.time
-                    }
-                )
-            }
-            _ => panic!("unexpected"),
-        };
-        // ====== when order has an execution fee
-        creator_order.execution_fee = Some(Uint128(1));
-        // ======= when order is partially filled
-        update_creator_order_and_associated_contract_order(
-            &mut deps.storage,
-            &creator_order.creator,
-            creator_order.clone(),
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-        )
-        .unwrap();
-
-        // ====== * it does not send the execution fee
-        let handle_msg = HandleMsg::Receive {
-            sender: config.admin.clone(),
-            from: config.admin.clone(),
-            amount: Uint128(MOCK_AMOUNT / 4),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        let handle_result = handle(&mut deps, mock_env(mock_token().address, &[]), handle_msg);
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![
-                snip20::send_msg(
-                    config.admin.clone(),
-                    Uint128(MOCK_AMOUNT / 4),
-                    None,
-                    None,
-                    BLOCK_SIZE,
-                    mock_butt().contract_hash,
-                    mock_butt().address,
-                )
-                .unwrap(),
-                snip20::transfer_msg(
-                    mock_user_address(),
-                    Uint128(MOCK_AMOUNT / 4),
-                    None,
-                    BLOCK_SIZE,
-                    mock_token().contract_hash,
-                    mock_token().address,
-                )
-                .unwrap(),
-            ]
-        );
-
-        // ======= when order is completely unfilled
-        creator_order.from_amount_filled = Uint128(0);
-        creator_order.net_to_amount_filled = Uint128(0);
-        creator_order.execution_fee = Some(Uint128(1));
-        update_creator_order_and_associated_contract_order(
-            &mut deps.storage,
-            &creator_order.creator,
-            creator_order.clone(),
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-        )
-        .unwrap();
-
-        // ======== when route state exists
-        let route_state: RouteState = RouteState {
-            current_hop: None,
-            remaining_hops: VecDeque::new(),
-            borrow_amount: Uint128(5),
-            borrow_token: mock_sscrt(),
-            initiator: mock_contract().address,
-            minimum_acceptable_amount: Some(Uint128(5)),
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        // ======== * it sends the execution fee to the route initiator
-        let handle_msg = HandleMsg::Receive {
-            sender: config.admin.clone(),
-            from: config.admin.clone(),
-            amount: Uint128(MOCK_AMOUNT / 8),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![
-                snip20::send_msg(
-                    config.admin.clone(),
-                    Uint128(MOCK_AMOUNT / 8),
-                    None,
-                    None,
-                    BLOCK_SIZE,
-                    mock_butt().contract_hash,
-                    mock_butt().address,
-                )
-                .unwrap(),
-                snip20::transfer_msg(
-                    mock_user_address(),
-                    Uint128(MOCK_AMOUNT / 8),
-                    None,
-                    BLOCK_SIZE,
-                    mock_token().contract_hash,
-                    mock_token().address,
-                )
-                .unwrap(),
-                snip20::transfer_msg(
-                    mock_contract().address,
-                    creator_order.execution_fee.unwrap(),
-                    None,
-                    BLOCK_SIZE,
-                    mock_sscrt().contract_hash,
-                    mock_sscrt().address,
-                )
-                .unwrap(),
-            ]
-        );
-
-        // ======== when route state does not exist
-        creator_order.from_amount_filled = Uint128(0);
-        creator_order.net_to_amount_filled = Uint128(0);
-        creator_order.execution_fee = Some(Uint128(1));
-        update_creator_order_and_associated_contract_order(
-            &mut deps.storage,
-            &creator_order.creator,
-            creator_order.clone(),
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-        )
-        .unwrap();
-
-        delete_route_state(&mut deps.storage);
-        // ======== * it sends the execution fee to the user calling the function
-        let handle_result = handle(&mut deps, mock_env(mock_token().address, &[]), handle_msg);
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![
-                snip20::send_msg(
-                    config.admin.clone(),
-                    Uint128(MOCK_AMOUNT / 8),
-                    None,
-                    None,
-                    BLOCK_SIZE,
-                    mock_butt().contract_hash,
-                    mock_butt().address,
-                )
-                .unwrap(),
-                snip20::transfer_msg(
-                    mock_user_address(),
-                    Uint128(MOCK_AMOUNT / 8),
-                    None,
-                    BLOCK_SIZE,
-                    mock_token().contract_hash,
-                    mock_token().address,
-                )
-                .unwrap(),
-                snip20::transfer_msg(
-                    config.admin,
-                    creator_order.execution_fee.unwrap(),
-                    None,
-                    BLOCK_SIZE,
-                    mock_sscrt().contract_hash,
-                    mock_sscrt().address,
-                )
-                .unwrap(),
-            ]
-        );
     }
 
     #[test]
@@ -2406,608 +1593,6 @@ mod tests {
         .unwrap();
         // ==== * it deletes the route state
         assert_eq!(read_route_state(&deps.storage).unwrap().is_none(), true);
-    }
-
-    #[test]
-    fn test_handle_first_hop() {
-        let (_init_result, mut deps) = init_helper(true);
-        let borrow_amount: Uint128 = Uint128(555);
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        create_order_helper(&mut deps);
-        let first_hop = Hop {
-            from_token: mock_butt(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(0)),
-        };
-        hops.push_back(first_hop.clone());
-        let handle_msg = HandleMsg::HandleFirstHop {
-            borrow_amount,
-            hops: hops.clone(),
-            minimum_acceptable_amount: Some(borrow_amount),
-        };
-        // when called by an address that is not in the addresses allowed to fill
-        // * it raises an Unauthorized error
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_user_address(), &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::Unauthorized { backtrace: None }
-        );
-        // when called by an address that is allowed to fill
-        // = when hops is less than 2
-        // = * it raises an error
-        let handle_result = handle(
-            &mut deps,
-            mock_env(HumanAddr::from(MOCK_ADMIN), &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Route must be 2 hops.")
-        );
-        // = when there are more than 2 hops
-        hops.push_back(Hop {
-            from_token: mock_butt(),
-            trade_smart_contract: mock_contract(),
-            position: None,
-        });
-        hops.push_back(Hop {
-            from_token: mock_butt(),
-            trade_smart_contract: mock_contract(),
-            position: None,
-        });
-        let handle_result = handle(
-            &mut deps,
-            mock_env(HumanAddr::from(MOCK_ADMIN), &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Route must be 2 hops.")
-        );
-        // == when there are 2 hops
-        hops.pop_back();
-        let handle_msg = HandleMsg::HandleFirstHop {
-            borrow_amount,
-            hops: hops.clone(),
-            minimum_acceptable_amount: Some(borrow_amount),
-        };
-        let handle_unwrapped = handle(
-            &mut deps,
-            mock_env(HumanAddr::from(MOCK_ADMIN), &[]),
-            handle_msg.clone(),
-        )
-        .unwrap();
-        let route_state: RouteState = read_route_state(&deps.storage).unwrap().unwrap();
-        // == * it stores the current hop
-        assert_eq!(route_state.current_hop.unwrap(), first_hop);
-        // == * it stores the borrow amount
-        assert_eq!(route_state.borrow_amount, borrow_amount);
-        // == * it stores the borrow token as the first hops from_token
-        assert_eq!(route_state.borrow_token, first_hop.from_token);
-        // == * it stores the address to send left over amount after paying back debt
-        assert_eq!(route_state.initiator, HumanAddr::from(MOCK_ADMIN));
-        // == * it stores the remaining hops
-        hops.pop_front();
-        assert_eq!(route_state.remaining_hops, hops);
-        // === when first hop is to limit order smart contract (second isn't)
-        // === * it stores the send_excess_to as the initiator
-        assert_eq!(route_state.send_excess_to, HumanAddr::from(MOCK_ADMIN));
-        // === * it sends the token with the right message to the swap contract
-        // === * it sends a message to finalize the contract
-        assert_eq!(
-            handle_unwrapped.messages,
-            vec![
-                snip20::send_msg(
-                    first_hop.trade_smart_contract.address,
-                    borrow_amount,
-                    Some(
-                        to_binary(&ReceiveMsg::FillOrder {
-                            position: first_hop.position.unwrap(),
-                        })
-                        .unwrap()
-                    ),
-                    None,
-                    BLOCK_SIZE,
-                    first_hop.from_token.contract_hash,
-                    first_hop.from_token.address,
-                )
-                .unwrap(),
-                CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: mock_contract().address,
-                    callback_code_hash: mock_contract().contract_hash,
-                    msg: to_binary(&HandleMsg::FinalizeRoute {}).unwrap(),
-                    send: vec![],
-                })
-            ]
-        );
-        // === when first hop is to swap contract
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        let first_hop = Hop {
-            from_token: mock_butt(),
-            position: None,
-            trade_smart_contract: mock_contract(),
-        };
-        hops.push_back(first_hop.clone());
-        hops.push_back(Hop {
-            from_token: mock_butt(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(0)),
-        });
-        let handle_msg = HandleMsg::HandleFirstHop {
-            borrow_amount,
-            hops: hops.clone(),
-            minimum_acceptable_amount: Some(borrow_amount),
-        };
-        let handle_unwrapped = handle(
-            &mut deps,
-            mock_env(HumanAddr::from(MOCK_ADMIN), &[]),
-            handle_msg.clone(),
-        )
-        .unwrap();
-        // === * it sends the token with the right message to the swap contract
-        // === * it sends a message to finalize the contract
-        assert_eq!(
-            handle_unwrapped.messages,
-            vec![
-                snip20::send_msg(
-                    first_hop.trade_smart_contract.address,
-                    borrow_amount,
-                    Some(
-                        to_binary(&Snip20Swap::Swap {
-                            expected_return: None,
-                            to: Some(mock_contract().address),
-                        })
-                        .unwrap()
-                    ),
-                    None,
-                    BLOCK_SIZE,
-                    first_hop.from_token.contract_hash,
-                    first_hop.from_token.address,
-                )
-                .unwrap(),
-                CosmosMsg::Wasm(WasmMsg::Execute {
-                    contract_addr: mock_contract().address,
-                    callback_code_hash: mock_contract().contract_hash,
-                    msg: to_binary(&HandleMsg::FinalizeRoute {}).unwrap(),
-                    send: vec![],
-                })
-            ]
-        );
-        // === when both hops are for limit orders
-        let receive_msg = ReceiveMsg::CreateOrder {
-            to_amount: Uint128(MOCK_AMOUNT),
-            to_token: mock_token().address,
-        };
-        let handle_msg = HandleMsg::Receive {
-            sender: HumanAddr::from("secretgary"),
-            from: HumanAddr::from("secretgary"),
-            amount: Uint128(MOCK_AMOUNT),
-            msg: Some(to_binary(&receive_msg).unwrap()),
-        };
-        handle(
-            &mut deps,
-            mock_env(mock_butt().address, &[]),
-            handle_msg.clone(),
-        )
-        .unwrap();
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        hops.push_back(Hop {
-            from_token: mock_butt(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(0)),
-        });
-        hops.push_back(Hop {
-            from_token: mock_butt(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(1)),
-        });
-        // === * it sets the send_excess_to on the route as the creator of the newest limit order
-        let handle_msg = HandleMsg::HandleFirstHop {
-            borrow_amount,
-            hops: hops.clone(),
-            minimum_acceptable_amount: Some(borrow_amount),
-        };
-        handle(
-            &mut deps,
-            mock_env(HumanAddr::from(MOCK_ADMIN), &[]),
-            handle_msg.clone(),
-        )
-        .unwrap();
-        let route_state: RouteState = read_route_state(&deps.storage).unwrap().unwrap();
-        // === * it stores the send_excess_to as the initiator
-        assert_eq!(route_state.send_excess_to, HumanAddr::from("secretgary"));
-    }
-
-    #[test]
-    fn test_handle_hop() {
-        let (_init_result, mut deps) = init_helper(true);
-        let borrow_amount: Uint128 = Uint128(MOCK_AMOUNT);
-        let borrow_token: SecretContract = mock_butt();
-        let minimum_acceptable_amount: Uint128 = borrow_amount + Uint128(1);
-        create_order_helper(&mut deps);
-        create_order_helper(&mut deps);
-
-        // when route state does not exist
-        // * it raises an error
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: Uint128(MOCK_AMOUNT),
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("cannot find route")
-        );
-
-        // when route state exists
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        hops.push_back(Hop {
-            from_token: mock_token(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(1)),
-        });
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_butt(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(2)),
-            }),
-            remaining_hops: hops,
-            borrow_token: borrow_token.clone(),
-            borrow_amount,
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: Some(borrow_amount),
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-
-        // = when not called by the current hop's trade smart contract
-        // = * it raises an error
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_butt().address,
-            from: mock_butt().address,
-            amount: Uint128(MOCK_AMOUNT),
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Route called from wrong trade smart contract.")
-        );
-
-        // = when from current hop's trade smart contract
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: Uint128(MOCK_AMOUNT),
-            msg: None,
-        };
-        // == when there are hops
-        // === when called by a token different from the next hops from token
-        // === * it raises an error
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_butt().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Route called by wrong token.")
-        );
-        // === when called by the from token of the next hop
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        // === * it stores the route state with the appropriate info
-        let route_state: RouteState = read_route_state(&deps.storage).unwrap().unwrap();
-        assert_eq!(
-            route_state,
-            RouteState {
-                current_hop: Some(Hop {
-                    from_token: mock_token(),
-                    trade_smart_contract: mock_contract(),
-                    position: Some(Uint128(1)),
-                }),
-                borrow_token: borrow_token.clone(),
-                remaining_hops: VecDeque::new(),
-                borrow_amount,
-                initiator: mock_user_address(),
-                minimum_acceptable_amount: Some(borrow_amount),
-                send_excess_to: mock_contract().address,
-            }
-        );
-
-        // ==== when the next hop has a position value
-        // ===== when amount received is equal to or less than the next order's unfilled amount
-        // ===== * it sends the amount received to the next hop trade smart contract with the correct details
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![snip20::send_msg(
-                mock_contract().address,
-                Uint128(MOCK_AMOUNT),
-                Some(
-                    to_binary(&ReceiveMsg::FillOrder {
-                        position: Uint128(1)
-                    })
-                    .unwrap()
-                ),
-                None,
-                BLOCK_SIZE,
-                mock_token().contract_hash,
-                mock_token().address,
-            )
-            .unwrap()]
-        );
-
-        // ===== when amount received is greater than the next order's unfilled amount
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        hops.push_back(Hop {
-            from_token: mock_token(),
-            trade_smart_contract: mock_contract(),
-            position: Some(Uint128(1)),
-        });
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_butt(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(2)),
-            }),
-            remaining_hops: hops,
-            borrow_token: borrow_token.clone(),
-            borrow_amount,
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: Some(borrow_amount),
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: Uint128(MOCK_AMOUNT + 1),
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-
-        // ===== * it sends the next order's unfilled amount
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![snip20::send_msg(
-                mock_contract().address,
-                Uint128(MOCK_AMOUNT),
-                Some(
-                    to_binary(&ReceiveMsg::FillOrder {
-                        position: Uint128(1)
-                    })
-                    .unwrap()
-                ),
-                None,
-                BLOCK_SIZE,
-                mock_token().contract_hash,
-                mock_token().address,
-            )
-            .unwrap()]
-        );
-
-        // ==== when the next hop does not have a position value
-        let mut hops: VecDeque<Hop> = VecDeque::new();
-        hops.push_back(Hop {
-            from_token: mock_token(),
-            trade_smart_contract: mock_butt(),
-            position: None,
-        });
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_butt(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(2)),
-            }),
-            remaining_hops: hops,
-            borrow_token: borrow_token.clone(),
-            borrow_amount,
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: Some(borrow_amount),
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        // ==== * it sends the amount received to the next hop trade smart contract with the correct details
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: Uint128(MOCK_AMOUNT),
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![snip20::send_msg(
-                mock_butt().address,
-                Uint128(MOCK_AMOUNT),
-                Some(
-                    to_binary(&Snip20Swap::Swap {
-                        expected_return: None,
-                        to: Some(mock_contract().address)
-                    })
-                    .unwrap()
-                ),
-                None,
-                BLOCK_SIZE,
-                mock_token().contract_hash,
-                mock_token().address,
-            )
-            .unwrap()]
-        );
-
-        // == when there are are no hops
-        let hops: VecDeque<Hop> = VecDeque::new();
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_butt(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(2)),
-            }),
-            remaining_hops: hops.clone(),
-            borrow_token: borrow_token.clone(),
-            borrow_amount,
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: Some(minimum_acceptable_amount),
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        // === when not called by the borrowed token
-        let handle_result = handle(
-            &mut deps,
-            mock_env(mock_token().address, &[]),
-            handle_msg.clone(),
-        );
-        // === * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Route called by wrong token.")
-        );
-        // === when called by the borrowed token
-        // ==== when amount sent in is less than the minimum acceptable amount
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: borrow_amount,
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(borrow_token.address.clone(), &[]),
-            handle_msg.clone(),
-        );
-        // ==== * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Operation fell short of minimum_acceptable_amount.")
-        );
-
-        // ==== when amount sent in is less than the borrowed amount
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: (borrow_amount - Uint128(1)).unwrap(),
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(borrow_token.address.clone(), &[]),
-            handle_msg.clone(),
-        );
-        // ==== * it raises an error
-        assert_eq!(
-            handle_result.unwrap_err(),
-            StdError::generic_err("Operation fell short of borrow_amount.")
-        );
-        // ==== when amount sent in is equal to the borrowed amount
-        let hops: VecDeque<Hop> = VecDeque::new();
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_butt(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(2)),
-            }),
-            remaining_hops: hops.clone(),
-            borrow_token: borrow_token.clone(),
-            borrow_amount,
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: None,
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: borrow_amount,
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(borrow_token.address.clone(), &[]),
-            handle_msg.clone(),
-        );
-        // ==== * it stores the current hop as None
-        let route_state: RouteState = read_route_state(&deps.storage).unwrap().unwrap();
-        // ==== * it stores the rest of the route state appropriately
-        assert_eq!(
-            route_state,
-            RouteState {
-                current_hop: None,
-                borrow_token: borrow_token.clone(),
-                remaining_hops: hops,
-                borrow_amount,
-                initiator: mock_user_address(),
-                minimum_acceptable_amount: None,
-                send_excess_to: mock_contract().address,
-            }
-        );
-        // ==== * it does not send any messages
-        assert_eq!(handle_result.unwrap().messages, vec![]);
-        // ==== when amount sent in is greater than the borrowed amount
-        let hops: VecDeque<Hop> = VecDeque::new();
-        let route_state: RouteState = RouteState {
-            current_hop: Some(Hop {
-                from_token: mock_butt(),
-                trade_smart_contract: mock_contract(),
-                position: Some(Uint128(2)),
-            }),
-            remaining_hops: hops.clone(),
-            borrow_token: borrow_token.clone(),
-            borrow_amount,
-            initiator: mock_user_address(),
-            minimum_acceptable_amount: Some(borrow_amount),
-            send_excess_to: mock_contract().address,
-        };
-        store_route_state(&mut deps.storage, &route_state).unwrap();
-        let handle_msg = HandleMsg::Receive {
-            sender: mock_contract().address,
-            from: mock_contract().address,
-            amount: borrow_amount + Uint128(1),
-            msg: None,
-        };
-        let handle_result = handle(
-            &mut deps,
-            mock_env(borrow_token.address.clone(), &[]),
-            handle_msg.clone(),
-        );
-        // ==== * it sends the excess after paying the borrowed amount to the send_excess_to address
-        assert_eq!(
-            handle_result.unwrap().messages,
-            vec![snip20::transfer_msg(
-                route_state.send_excess_to,
-                Uint128(1),
-                None,
-                BLOCK_SIZE,
-                borrow_token.contract_hash.clone(),
-                borrow_token.address.clone(),
-            )
-            .unwrap()]
-        );
     }
 
     #[test]
@@ -3276,10 +1861,8 @@ mod tests {
     #[test]
     fn test_update_config() {
         let (_init_result, mut deps) = init_helper(false);
-        let new_addresses_allowed_to_fill = vec![mock_user_address()];
         let handle_msg = HandleMsg::UpdateConfig {
-            addresses_allowed_to_fill: Some(new_addresses_allowed_to_fill.clone()),
-            execution_fee: Some(Uint128(MOCK_AMOUNT)),
+            execution_fee: Uint128(MOCK_AMOUNT),
         };
         let env = mock_env(mock_user_address(), &[]);
         // = when called by a non-admin
@@ -3292,10 +1875,6 @@ mod tests {
 
         // = when called by the admin
         let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-        assert_eq!(
-            config.addresses_allowed_to_fill,
-            vec![config.admin, env.contract.address.clone()]
-        );
         assert_eq!(config.execution_fee, mock_execution_fee());
         handle(
             &mut deps,
@@ -3303,12 +1882,7 @@ mod tests {
             handle_msg,
         )
         .unwrap();
-        // = * it updates the addresses_allowed_to_fill and adds admin and contract address
         let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-        assert_eq!(
-            config.addresses_allowed_to_fill,
-            vec![mock_user_address(), env.contract.address, config.admin]
-        );
         // = * it updates the execution_fee
         assert_eq!(config.execution_fee, Uint128(MOCK_AMOUNT))
     }

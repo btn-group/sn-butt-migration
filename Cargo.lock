@@ -170,8 +170,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "cw-secret-network-limit-orders"
-version = "8.0.0"
+name = "cw-secret-network-butt-migration"
+version = "1.0.0"
 dependencies = [
  "cosmwasm-schema",
  "cosmwasm-std",
