@@ -6,4 +6,3 @@ pub const MOCK_TOKEN_ADDRESS: &str = "mock-token-address";
 pub const PREFIX_ORDERS: &[u8] = b"orders";
 pub const PREFIX_ORDERS_COUNT: &[u8] = b"orders_count";
 pub const PREFIX_REGISTERED_TOKENS: &[u8] = b"registered_tokens";
-pub const ROUTE_STATE_KEY: &[u8] = b"route_state";
