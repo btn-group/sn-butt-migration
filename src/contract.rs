@@ -279,6 +279,7 @@ fn create_order<S: Storage, A: Api, Q: Querier>(
         amount,
         to,
         status: 0,
+        azero_transaction_hash: None,
         created_at_block_time: env.block.time,
         created_at_block_height: env.block.height,
     };
@@ -1120,6 +1121,7 @@ mod tests {
             amount: Uint128(MOCK_AMOUNT),
             to: mock_token().address,
             status: 0,
+            azero_transaction_hash: None,
             created_at_block_time: mock_env(MOCK_ADMIN, &[]).block.time,
             created_at_block_height: mock_env(MOCK_ADMIN, &[]).block.height,
         };
@@ -1378,7 +1380,6 @@ mod tests {
                 }],
             })]
         );
-
         // == when only token address and key are specified
         // === when token address is BUTT
         // === * it raises an error
