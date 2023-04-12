@@ -4,8 +4,8 @@ use crate::constants::{
 };
 use crate::msg::{HandleMsg, InitMsg, QueryAnswer, QueryMsg, ReceiveMsg};
 use crate::state::{
-    read_registered_token, write_registered_token, Config, HumanizedOrder, Order, RegisteredToken,
-    SecretContract,
+    read_registered_token, write_registered_token, Config, FillDetail, HumanizedOrder, Order,
+    RegisteredToken, SecretContract,
 };
 use crate::validations::{authorize, validate_human_addr, validate_uint128};
 use cosmwasm_std::{
@@ -47,6 +47,7 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<HandleResponse> {
     match msg {
         HandleMsg::CancelOrder { position } => cancel_order(deps, &env, position.u128()),
+        HandleMsg::FillOrders { fill_details } => fill_orders(deps, &env, fill_details),
         HandleMsg::Receive {
             from, amount, msg, ..
         } => receive(deps, env, from, amount, msg),
@@ -294,6 +295,60 @@ fn create_order<S: Storage, A: Api, Q: Querier>(
         messages: vec![],
         log: vec![],
         data: Some(to_binary(&order.into_humanized(&deps.api)?)?),
+    })
+}
+
+fn fill_orders<S: Storage, A: Api, Q: Querier>(
+    deps: &mut Extern<S, A, Q>,
+    env: &Env,
+    fill_details: Vec<FillDetail>,
+) -> StdResult<HandleResponse> {
+    let mut config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
+    authorize(vec![config.admin.clone()], &env.message.sender)?;
+
+    let mut messages = vec![];
+    let mut amount_to_send_to_mount_doom: Uint128 = Uint128(0);
+    // Store order
+    let contract_address: CanonicalAddr = deps.api.canonical_address(&env.contract.address)?;
+    for fill_detail in fill_details.iter() {
+        let contract_order = order_at_position(
+            &deps.storage,
+            &contract_address,
+            fill_detail.position.u128(),
+        )?;
+        if contract_order.status == 0 && contract_order.execution_fee.is_some() {
+            let creator_order_position: Uint128 = contract_order.other_storage_position;
+            let mut creator_order = contract_order;
+            creator_order.position = creator_order_position;
+            creator_order.other_storage_position = fill_detail.position;
+            creator_order.status = 1;
+            creator_order.azero_transaction_hash = Some(fill_detail.azero_transaction_hash.clone());
+            update_creator_order_and_associated_contract_order(
+                &mut deps.storage,
+                &creator_order.creator,
+                creator_order.clone(),
+                &contract_address,
+            )?;
+            amount_to_send_to_mount_doom += creator_order.amount;
+        }
+    }
+    if !amount_to_send_to_mount_doom.is_zero() {
+        config.total_sent_to_mount_doom += amount_to_send_to_mount_doom;
+        messages.push(snip20::transfer_msg(
+            config.mount_doom.address.clone(),
+            amount_to_send_to_mount_doom,
+            None,
+            BLOCK_SIZE,
+            config.butt.contract_hash.clone(),
+            config.butt.address.clone(),
+        )?);
+        TypedStoreMut::attach(&mut deps.storage).store(CONFIG_KEY, &config)?;
+    }
+
+    Ok(HandleResponse {
+        messages,
+        log: vec![],
+        data: None,
     })
 }
 

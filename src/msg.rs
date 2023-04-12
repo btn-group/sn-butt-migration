@@ -1,4 +1,4 @@
-use crate::state::{HumanizedOrder, SecretContract};
+use crate::state::{FillDetail, HumanizedOrder, SecretContract};
 use cosmwasm_std::{Binary, HumanAddr, Uint128};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,9 @@ pub struct InitMsg {
 pub enum HandleMsg {
     CancelOrder {
         position: Uint128,
+    },
+    FillOrders {
+        fill_details: Vec<FillDetail>,
     },
     Receive {
         sender: HumanAddr,

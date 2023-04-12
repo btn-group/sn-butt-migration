@@ -15,6 +15,12 @@ pub struct Config {
     pub total_sent_to_mount_doom: Uint128,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]
+pub struct FillDetail {
+    pub position: Uint128,
+    pub azero_transaction_hash: String,
+}
+
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone, JsonSchema)]
 pub struct SecretContract {
     pub address: HumanAddr,
