@@ -30,6 +30,7 @@ pub fn init<S: Storage, A: Api, Q: Querier>(
         mount_doom: msg.mount_doom,
         execution_fee: msg.execution_fee,
         sscrt: msg.sscrt,
+        total_sent_to_mount_doom: Uint128(0),
     };
     config_store.store(CONFIG_KEY, &config)?;
 
@@ -1075,6 +1076,7 @@ mod tests {
                 execution_fee: mock_execution_fee(),
                 mount_doom: mock_mount_doom(),
                 sscrt: mock_sscrt(),
+                total_sent_to_mount_doom: Uint128(0)
             },
             value
         );
