@@ -24,6 +24,28 @@
     {
       "type": "object",
       "required": [
+        "fill_orders"
+      ],
+      "properties": {
+        "fill_orders": {
+          "type": "object",
+          "required": [
+            "fill_details"
+          ],
+          "properties": {
+            "fill_details": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/FillDetail"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
         "receive"
       ],
       "properties": {
@@ -137,6 +159,21 @@
     "Binary": {
       "description": "Binary is a wrapper around Vec<u8> to add base64 de/serialization with serde. It also adds some helper methods to help encode inline.\n\nThis is only needed as serde-json-{core,wasm} has a horrible encoding for Vec<u8>",
       "type": "string"
+    },
+    "FillDetail": {
+      "type": "object",
+      "required": [
+        "azero_transaction_hash",
+        "position"
+      ],
+      "properties": {
+        "azero_transaction_hash": {
+          "type": "string"
+        },
+        "position": {
+          "$ref": "#/definitions/Uint128"
+        }
+      }
     },
     "HumanAddr": {
       "type": "string"
