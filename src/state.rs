@@ -12,6 +12,7 @@ pub struct Config {
     pub mount_doom: SecretContract,
     pub execution_fee: Uint128,
     pub sscrt: SecretContract,
+    pub total_sent_to_mount_doom: Uint128,
 }
 
 #[derive(Serialize, Deserialize, Eq, PartialEq, Debug, Clone, JsonSchema)]
