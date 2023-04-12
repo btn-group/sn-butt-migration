@@ -57,6 +57,7 @@ pub struct HumanizedOrder {
     pub amount: Uint128,
     pub to: HumanAddr,
     pub status: u8,
+    pub azero_transaction_hash: Option<String>,
     pub created_at_block_time: u64,
     pub created_at_block_height: u64,
 }
@@ -71,6 +72,7 @@ pub struct Order {
     pub amount: Uint128,
     pub to: HumanAddr,
     pub status: u8,
+    pub azero_transaction_hash: Option<String>,
     pub created_at_block_time: u64,
     pub created_at_block_height: u64,
 }
@@ -83,6 +85,7 @@ impl Order {
             amount: self.amount,
             to: self.to,
             status: self.status,
+            azero_transaction_hash: self.azero_transaction_hash,
             created_at_block_time: self.created_at_block_time,
             created_at_block_height: self.created_at_block_height,
         })
