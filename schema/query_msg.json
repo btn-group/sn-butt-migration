@@ -43,36 +43,6 @@
           }
         }
       }
-    },
-    {
-      "type": "object",
-      "required": [
-        "orders_by_positions"
-      ],
-      "properties": {
-        "orders_by_positions": {
-          "type": "object",
-          "required": [
-            "address",
-            "key",
-            "positions"
-          ],
-          "properties": {
-            "address": {
-              "$ref": "#/definitions/HumanAddr"
-            },
-            "key": {
-              "type": "string"
-            },
-            "positions": {
-              "type": "array",
-              "items": {
-                "$ref": "#/definitions/Uint128"
-              }
-            }
-          }
-        }
-      }
     }
   ],
   "definitions": {
