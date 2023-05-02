@@ -35,6 +35,7 @@ This is a smart contract to assist with the migration of BUTT to other chains. I
 1. Allow/enforce admin to transfer BUTT to Mount Doom only.
 2. Allow users to send BUTT to the smart contract and specify the Aleph Zero wallet address they want it sent to, privately.
 3. Collect a fee per transaction.
+4. Allow/enforce admin to set the Aleph Zero transaction hash for the order.
 
 <p align="right">(<a href="#top">back to top</a>)</p>
 
