@@ -59,11 +59,6 @@ pub enum QueryMsg {
         page: Uint128,
         page_size: Uint128,
     },
-    OrdersByPositions {
-        address: HumanAddr,
-        key: String,
-        positions: Vec<Uint128>,
-    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, JsonSchema)]

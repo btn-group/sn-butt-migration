@@ -79,11 +79,6 @@ pub fn query<S: Storage, A: Api, Q: Querier>(
             page,
             page_size,
         } => orders(deps, address, key, page.u128(), page_size.u128()),
-        QueryMsg::OrdersByPositions {
-            address,
-            key,
-            positions,
-        } => orders_by_positions(deps, address, key, positions),
     }
 }
 
@@ -409,29 +404,6 @@ fn orders<S: Storage, A: Api, Q: Querier>(
     let result = QueryAnswer::Orders {
         orders,
         total: Some(Uint128(total)),
-    };
-    to_binary(&result)
-}
-
-fn orders_by_positions<S: Storage, A: Api, Q: Querier>(
-    deps: &Extern<S, A, Q>,
-    address: HumanAddr,
-    key: String,
-    positions: Vec<Uint128>,
-) -> StdResult<Binary> {
-    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    query_balance_of_token(deps, address.clone(), config.butt, key)?;
-
-    let address = deps.api.canonical_address(&address)?;
-    let mut orders: Vec<HumanizedOrder> = vec![];
-    for position in positions.iter() {
-        let order = order_at_position(&deps.storage, &address, position.u128())?;
-        orders.push(order.into_humanized(&deps.api)?)
-    }
-
-    let result = QueryAnswer::Orders {
-        orders,
-        total: None,
     };
     to_binary(&result)
 }
@@ -1380,73 +1352,6 @@ mod tests {
             config.total_sent_to_mount_doom,
             contract_order.amount + contract_order.amount
         );
-    }
-
-    #[test]
-    fn test_orders_by_positions() {
-        let (_init_result, mut deps) = init_helper(true);
-
-        // when user's address and butt viewing key combo is correct
-        // = when user does not have any orders yet
-        // = * it raises an error
-        let mut res = query(
-            &deps,
-            QueryMsg::OrdersByPositions {
-                address: mock_user_address(),
-                key: MOCK_VIEWING_KEY.to_string(),
-                positions: vec![Uint128(0)],
-            },
-        );
-        assert_eq!(
-            res.unwrap_err(),
-            NotFound {
-                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
-                backtrace: None
-            }
-        );
-
-        // = when user has orders
-        create_order_helper(&mut deps);
-        create_order_helper(&mut deps);
-        create_order_helper(&mut deps);
-        create_order_helper(&mut deps);
-        create_order_helper(&mut deps);
-        // == when position requested is unavailable
-        res = query(
-            &deps,
-            QueryMsg::OrdersByPositions {
-                address: mock_user_address(),
-                key: MOCK_VIEWING_KEY.to_string(),
-                positions: vec![Uint128(1), Uint128(2), Uint128(3), Uint128(5)],
-            },
-        );
-        assert_eq!(
-            res.unwrap_err(),
-            NotFound {
-                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
-                backtrace: None
-            }
-        );
-        // == when position requested is available
-        res = query(
-            &deps,
-            QueryMsg::OrdersByPositions {
-                address: mock_user_address(),
-                key: MOCK_VIEWING_KEY.to_string(),
-                positions: vec![Uint128(1), Uint128(3), Uint128(4)],
-            },
-        );
-        // == * it returns the humanized orders at those positions
-        let query_answer: QueryAnswer = from_binary(&res.unwrap()).unwrap();
-        match query_answer {
-            QueryAnswer::Orders { orders, total } => {
-                assert_eq!(total, None);
-                assert_eq!(orders[0].creator, mock_user_address());
-                assert_eq!(orders[0].position, Uint128(1));
-                assert_eq!(orders[1].position, Uint128(3));
-                assert_eq!(orders[2].position, Uint128(4));
-            }
-        };
     }
 
     #[test]
