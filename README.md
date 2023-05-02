@@ -82,7 +82,93 @@ cd code
 # Store contracts required for test
 secretcli tx compute store snip-20-reference-impl.wasm.gz --from a --gas 3000000 -y --keyring-backend test
 secretcli tx compute store sn-butt-migration.wasm.gz --from a --gas 3000000 -y --keyring-backend test
+```
 
-# Get the contract's id
+4. Get the contract's id
+
+```sh
 secretcli query compute list-code
+```
+
+5. Init BUTT 
+
+```sh
+CODE_ID=1
+INIT='{"name": "Buttcoin", "symbol": "BUTT", "decimals": 6, "initial_balances": [{"address": "secret1krq6nl2qdgu66t7ghsner7sr69nz8z8v7z9t3a", "amount": "1000000000000000000"},{"address": "secret1t9ppg25nm2fwds9c2dcfnn2r9gg79vla3j5ppl", "amount": "1000000000000000000"}], "prng_seed": "testing"}'
+secretcli tx compute instantiate $CODE_ID "$INIT" --from a --label "Buttcoin" -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+```
+
+6. Set viewing key for BUTT
+
+```sh
+secretcli tx compute execute secret18vd8fpwxzck93qlwghaj6arh4p7c5n8978vsyg '{"set_viewing_key": { "key": "testing" }}' --from a -y --keyring-backend test
+secretcli tx compute execute secret18vd8fpwxzck93qlwghaj6arh4p7c5n8978vsyg '{"set_viewing_key": { "key": "testing" }}' --from b -y --keyring-backend test
+```
+
+7. Init SSCRT
+
+```sh
+CODE_ID=1
+INIT='{"name": "SSCRT", "symbol": "SSCRT", "decimals": 6, "initial_balances": [{"address": "secret1krq6nl2qdgu66t7ghsner7sr69nz8z8v7z9t3a", "amount": "1000000000000000000"},{"address": "secret1t9ppg25nm2fwds9c2dcfnn2r9gg79vla3j5ppl", "amount": "1000000000000000000"}], "prng_seed": "testing"}'
+secretcli tx compute instantiate $CODE_ID "$INIT" --from a --label "SSCRT" -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+```
+
+8. Set viewing key for SSCRT
+
+```sh
+secretcli tx compute execute secret1hqrdl6wstt8qzshwc6mrumpjk9338k0lpsefm3 '{"set_viewing_key": { "key": "testing" }}' --from a -y --keyring-backend test
+secretcli tx compute execute secret1hqrdl6wstt8qzshwc6mrumpjk9338k0lpsefm3 '{"set_viewing_key": { "key": "testing" }}' --from b -y --keyring-backend test
+```
+
+9. Check instance creation
+
+```sh
+secretcli query compute list-contract-by-code $CODE_ID
+```
+
+10. Init BUTT Migration Contract
+
+```sh
+CODE_ID=2
+INIT='{"butt": {"address": "secret18vd8fpwxzck93qlwghaj6arh4p7c5n8978vsyg", "contract_hash": "35F5DB2BC5CD56815D10C7A567D6827BECCB8EAF45BC3FA016930C4A8209EA69"}, "mount_doom": {"address": "secret18vd8fpwxzck93qlwghaj6arh4p7c5n8978vsyg", "contract_hash": "35F5DB2BC5CD56815D10C7A567D6827BECCB8EAF45BC3FA016930C4A8209EA69"}, "execution_fee": "1", "sscrt": {"address": "secret1hqrdl6wstt8qzshwc6mrumpjk9338k0lpsefm3", "contract_hash": "35F5DB2BC5CD56815D10C7A567D6827BECCB8EAF45BC3FA016930C4A8209EA69"}}'
+secretcli tx compute instantiate $CODE_ID "$INIT" --from a --label "BUTT Migration" -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+CONTRACT_INSTANCE_ADDRESS=secret1sshdl5qajv0q0k6shlk8m9sd4lplpn6gvf82cx
+```
+
+11. Query Config
+
+```sh
+secretcli query compute query $CONTRACT_INSTANCE_ADDRESS '{"config": {}}'
+```
+
+12. Query Orders
+
+```sh
+# Users
+secretcli query compute query $CONTRACT_INSTANCE_ADDRESS '{"orders": {"address": "secret1krq6nl2qdgu66t7ghsner7sr69nz8z8v7z9t3a", "key": "testing", "page": "0", "page_size": "50"}}'
+# Contract
+secretcli query compute query $CONTRACT_INSTANCE_ADDRESS '{"orders": {"address": "secret1sshdl5qajv0q0k6shlk8m9sd4lplpn6gvf82cx", "key": "testing", "page": "0", "page_size": "50"}}'
+```
+
+12. Handle Msgs
+
+```sh
+# Cancel
+secretcli tx compute execute $CONTRACT_INSTANCE_ADDRESS '{"cancel_order": {"position": "0"}}' --from a -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+# Fill Orders
+secretcli tx compute execute $CONTRACT_INSTANCE_ADDRESS '{"fill_orders": {"fill_details": [{"position": "0", "azero_transaction_hash": "asdf"}]}}' --from a -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+# Register Tokens
+secretcli tx compute execute $CONTRACT_INSTANCE_ADDRESS '{"register_tokens": {"tokens": [{"address": "secret18vd8fpwxzck93qlwghaj6arh4p7c5n8978vsyg", "contract_hash": "35F5DB2BC5CD56815D10C7A567D6827BECCB8EAF45BC3FA016930C4A8209EA69"}, {"address": "secret1hqrdl6wstt8qzshwc6mrumpjk9338k0lpsefm3", "contract_hash": "35F5DB2BC5CD56815D10C7A567D6827BECCB8EAF45BC3FA016930C4A8209EA69"}], "viewing_key": "testing"}}' --from a -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+# Update Config
+secretcli tx compute execute $CONTRACT_INSTANCE_ADDRESS '{"update_config": {"execution_fee": "1"}}' --from a -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+```
+
+13. Send SSCRT for SetExecutionFeeForOrder
+
+```sh
+# These need to be sent in a broadcast transaction but I don't know how to do it in secretcli so try it out in production.
+# SetExecutionFeeForOrder
+secretcli tx compute execute secret1hqrdl6wstt8qzshwc6mrumpjk9338k0lpsefm3 '{"send": { "recipient": "secret1sshdl5qajv0q0k6shlk8m9sd4lplpn6gvf82cx", "amount": "1", "msg": "eyJzZXRfZXhlY3V0aW9uX2ZlZV9mb3Jfb3JkZXIiOnt9fQ==" }}' --from a -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
+# CreateOrder
+secretcli tx compute execute secret18vd8fpwxzck93qlwghaj6arh4p7c5n8978vsyg '{"send": { "recipient": "secret1sshdl5qajv0q0k6shlk8m9sd4lplpn6gvf82cx", "amount": "1000000", "msg": "eyJjcmVhdGVfb3JkZXIiOnsidG8iOiAiNUhpbXVTMTlNaEhYOUVnZ0Q5b1p6eDI5N3F0M1V4RWRrY2M1TldBaWFuUEFRd0hHIn19" }}' --from a -y --keyring-backend test --gas 3000000 --gas-prices=3.0uscrt
 ```
