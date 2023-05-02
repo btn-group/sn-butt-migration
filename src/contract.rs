@@ -1219,6 +1219,170 @@ mod tests {
     }
 
     #[test]
+    fn test_fill_orders() {
+        let azero_transaction_hash: String = "mock_azero_transaction_hash".to_string();
+        let (_init_result, mut deps) = init_helper(true);
+        let mut handle_msg = HandleMsg::FillOrders {
+            fill_details: vec![],
+        };
+
+        // = when not called by an admin
+        let mut handle_result = handle(
+            &mut deps,
+            mock_env(mock_contract().address, &[]),
+            handle_msg.clone(),
+        );
+        // = * it raises an error
+        assert_eq!(
+            handle_result.unwrap_err(),
+            StdError::Unauthorized { backtrace: None }
+        );
+
+        // = when called by an admin
+        // == when order in fill_details does not exist
+        handle_msg = HandleMsg::FillOrders {
+            fill_details: vec![
+                FillDetail {
+                    position: cosmwasm_std::Uint128(0),
+                    azero_transaction_hash: azero_transaction_hash.clone(),
+                },
+                FillDetail {
+                    position: cosmwasm_std::Uint128(1),
+                    azero_transaction_hash: azero_transaction_hash,
+                },
+            ],
+        };
+        handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
+        // == * it raises an error
+        assert_eq!(
+            handle_result.unwrap_err(),
+            NotFound {
+                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
+                backtrace: None
+            }
+        );
+
+        // == when order in fill_details exists
+        create_order_helper(&mut deps);
+        create_order_helper(&mut deps);
+        // === when order in fill_details is open (0)
+        // ==== when order in fill_details does not have an execution fee
+        let mut creator_order = order_at_position(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            1,
+        )
+        .unwrap();
+        creator_order.execution_fee = Some(cosmwasm_std::Uint128(1));
+        update_creator_order_and_associated_contract_order(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            creator_order.clone(),
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+        )
+        .unwrap();
+
+        // ==== * it does not set the order status to filled
+        // ==== * it does not send that order's butt to mount doom
+        // ==== * it does not increase butt sent to mount doom in config by that order's amount
+        handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
+        creator_order = order_at_position(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            0,
+        )
+        .unwrap();
+        let mut contract_order = order_at_position(
+            &mut deps.storage,
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(creator_order.status, 0);
+        assert_eq!(contract_order.status, 0);
+        let mut handle_result_unwrapped = handle_result.unwrap();
+        let mut config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
+        assert_eq!(
+            handle_result_unwrapped.messages,
+            vec![snip20::transfer_msg(
+                config.mount_doom.address.clone(),
+                creator_order.amount,
+                None,
+                BLOCK_SIZE,
+                config.butt.contract_hash.clone(),
+                config.butt.address.clone(),
+            )
+            .unwrap()]
+        );
+        assert_eq!(config.total_sent_to_mount_doom, contract_order.amount);
+
+        // ==== when order in fill_details has an execution fee
+        let mut creator_order = order_at_position(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            0,
+        )
+        .unwrap();
+        creator_order.execution_fee = Some(cosmwasm_std::Uint128(1));
+        update_creator_order_and_associated_contract_order(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            creator_order.clone(),
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+        )
+        .unwrap();
+
+        // ==== * it sets the order status to filled (1) for both user and contract
+        // ==== * it sends butt to mount doom
+        // ==== * it increases butt sent to mount doom in config
+        handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
+        creator_order = order_at_position(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            0,
+        )
+        .unwrap();
+        contract_order = order_at_position(
+            &mut deps.storage,
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+            0,
+        )
+        .unwrap();
+        assert_eq!(creator_order.status, 1);
+        assert_eq!(contract_order.status, 1);
+        handle_result_unwrapped = handle_result.unwrap();
+        assert_eq!(
+            handle_result_unwrapped.messages,
+            vec![snip20::transfer_msg(
+                config.mount_doom.address.clone(),
+                creator_order.amount,
+                None,
+                BLOCK_SIZE,
+                config.butt.contract_hash.clone(),
+                config.butt.address.clone(),
+            )
+            .unwrap()]
+        );
+        config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
+        assert_eq!(
+            config.total_sent_to_mount_doom,
+            contract_order.amount + contract_order.amount
+        );
+    }
+
+    #[test]
     fn test_orders_by_positions() {
         let (_init_result, mut deps) = init_helper(true);
 
