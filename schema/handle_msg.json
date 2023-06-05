@@ -24,6 +24,28 @@
     {
       "type": "object",
       "required": [
+        "change_orders_to_processing"
+      ],
+      "properties": {
+        "change_orders_to_processing": {
+          "type": "object",
+          "required": [
+            "order_positions"
+          ],
+          "properties": {
+            "order_positions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/definitions/Uint128"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
         "fill_orders"
       ],
       "properties": {

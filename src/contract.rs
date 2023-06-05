@@ -47,6 +47,9 @@ pub fn handle<S: Storage, A: Api, Q: Querier>(
 ) -> StdResult<HandleResponse> {
     match msg {
         HandleMsg::CancelOrder { position } => cancel_order(deps, &env, position.u128()),
+        HandleMsg::ChangeOrdersToProcessing { order_positions } => {
+            change_orders_to_processing(deps, &env, order_positions)
+        }
         HandleMsg::FillOrders { fill_details } => fill_orders(deps, &env, fill_details),
         HandleMsg::Receive {
             from, amount, msg, ..
@@ -247,6 +250,42 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
         log: vec![],
         data: Some(to_binary(&creator_order.into_humanized(&deps.api)?)?),
     }))
+}
+
+fn change_orders_to_processing<S: Storage, A: Api, Q: Querier>(
+    deps: &mut Extern<S, A, Q>,
+    env: &Env,
+    order_positions: Vec<Uint128>,
+) -> StdResult<HandleResponse> {
+    let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
+    authorize(vec![config.admin.clone()], &env.message.sender)?;
+
+    let messages = vec![];
+    // Store order
+    let contract_address: CanonicalAddr = deps.api.canonical_address(&env.contract.address)?;
+    for order_position in order_positions.iter() {
+        let contract_order =
+            order_at_position(&deps.storage, &contract_address, order_position.u128())?;
+        if contract_order.status == 0 {
+            let creator_order_position: Uint128 = contract_order.other_storage_position;
+            let mut creator_order = contract_order;
+            creator_order.position = creator_order_position;
+            creator_order.other_storage_position = *order_position;
+            creator_order.status = 1;
+            update_creator_order_and_associated_contract_order(
+                &mut deps.storage,
+                &creator_order.creator,
+                creator_order.clone(),
+                &contract_address,
+            )?;
+        }
+    }
+
+    Ok(HandleResponse {
+        messages,
+        log: vec![],
+        data: None,
+    })
 }
 
 // activity (0 => open, 1 => processing, 2 => filled, 3 => cancelled)
@@ -717,6 +756,66 @@ mod tests {
     }
 
     // === UNIT TESTS ===
+    #[test]
+    fn test_change_orders_to_processing() {
+        let (_init_result, mut deps) = init_helper(true);
+        let mut handle_msg = HandleMsg::ChangeOrdersToProcessing {
+            order_positions: vec![],
+        };
+
+        // = when not called by an admin
+        let mut handle_result = handle(
+            &mut deps,
+            mock_env(mock_contract().address, &[]),
+            handle_msg.clone(),
+        );
+        // = * it raises an error
+        assert_eq!(
+            handle_result.unwrap_err(),
+            StdError::Unauthorized { backtrace: None }
+        );
+
+        // = when called by an admin
+        // == when order in order_positions does not exist
+        handle_msg = HandleMsg::ChangeOrdersToProcessing {
+            order_positions: vec![cosmwasm_std::Uint128(0), cosmwasm_std::Uint128(1)],
+        };
+        handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
+        // == * it raises an error
+        assert_eq!(
+            handle_result.unwrap_err(),
+            NotFound {
+                kind: "cw_secret_network_butt_migration::state::Order".to_string(),
+                backtrace: None
+            }
+        );
+
+        // == when order in order_positions exists
+        create_order_helper(&mut deps);
+        create_order_helper(&mut deps);
+        // === when order in order_positions is open
+        // === * it sets the order status to processing
+        handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
+        handle_result.unwrap();
+        let creator_order = order_at_position(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            1,
+        )
+        .unwrap();
+        let contract_order = order_at_position(
+            &mut deps.storage,
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(creator_order.status, 1);
+        assert_eq!(contract_order.status, 1);
+    }
+
     #[test]
     fn test_set_execution_fee_for_order() {
         let (_init_result, mut deps) = init_helper(true);
