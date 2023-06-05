@@ -17,6 +17,9 @@ pub enum HandleMsg {
     CancelOrder {
         position: Uint128,
     },
+    ChangeOrdersToProcessing {
+        order_positions: Vec<Uint128>,
+    },
     FillOrders {
         fill_details: Vec<FillDetail>,
     },
