@@ -258,7 +258,7 @@ fn change_orders_to_processing<S: Storage, A: Api, Q: Querier>(
     order_positions: Vec<Uint128>,
 ) -> StdResult<HandleResponse> {
     let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
-    authorize(vec![config.admin.clone()], &env.message.sender)?;
+    authorize(vec![config.admin], &env.message.sender)?;
 
     // Store order
     let contract_address: CanonicalAddr = deps.api.canonical_address(&env.contract.address)?;
@@ -793,16 +793,48 @@ mod tests {
         create_order_helper(&mut deps);
         create_order_helper(&mut deps);
         // === when order is open
-        // === * it sets the order status to processing
-        handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
-        handle_result.unwrap();
-        let creator_order = order_at_position(
+        // ==== when order does not have an execution fee
+        // ==== * it does not set the order status to processing
+        handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone()).unwrap();
+        let mut creator_order = order_at_position(
             &mut deps.storage,
             &deps.api.canonical_address(&mock_user_address()).unwrap(),
             1,
         )
         .unwrap();
-        let contract_order = order_at_position(
+        let mut contract_order = order_at_position(
+            &mut deps.storage,
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+            1,
+        )
+        .unwrap();
+        assert_eq!(creator_order.status, 0);
+        assert_eq!(contract_order.status, 0);
+
+        // ==== when order has an execution fee
+        creator_order.execution_fee = Some(cosmwasm_std::Uint128(1));
+        update_creator_order_and_associated_contract_order(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            creator_order.clone(),
+            &deps
+                .api
+                .canonical_address(&mock_contract().address)
+                .unwrap(),
+        )
+        .unwrap();
+        // ==== * it sets the order status to processing
+        handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone()).unwrap();
+        creator_order = order_at_position(
+            &mut deps.storage,
+            &deps.api.canonical_address(&mock_user_address()).unwrap(),
+            1,
+        )
+        .unwrap();
+        contract_order = order_at_position(
             &mut deps.storage,
             &deps
                 .api
