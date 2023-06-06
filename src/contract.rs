@@ -260,13 +260,12 @@ fn change_orders_to_processing<S: Storage, A: Api, Q: Querier>(
     let config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
     authorize(vec![config.admin.clone()], &env.message.sender)?;
 
-    let messages = vec![];
     // Store order
     let contract_address: CanonicalAddr = deps.api.canonical_address(&env.contract.address)?;
     for order_position in order_positions.iter() {
         let contract_order =
             order_at_position(&deps.storage, &contract_address, order_position.u128())?;
-        if contract_order.status == 0 {
+        if contract_order.status == 0 && contract_order.execution_fee.is_some() {
             let creator_order_position: Uint128 = contract_order.other_storage_position;
             let mut creator_order = contract_order;
             creator_order.position = creator_order_position;
@@ -282,7 +281,7 @@ fn change_orders_to_processing<S: Storage, A: Api, Q: Querier>(
     }
 
     Ok(HandleResponse {
-        messages,
+        messages: vec![],
         log: vec![],
         data: None,
     })
@@ -350,7 +349,7 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
             &contract_address,
             fill_detail.position.u128(),
         )?;
-        if contract_order.status == 1 && contract_order.execution_fee.is_some() {
+        if contract_order.status == 1 {
             let creator_order_position: Uint128 = contract_order.other_storage_position;
             let mut creator_order = contract_order;
             creator_order.position = creator_order_position;
@@ -793,7 +792,7 @@ mod tests {
         // == when order in order_positions exists
         create_order_helper(&mut deps);
         create_order_helper(&mut deps);
-        // === when order in order_positions is open
+        // === when order is open
         // === * it sets the order status to processing
         handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
         handle_result.unwrap();
@@ -1336,31 +1335,13 @@ mod tests {
         // == when order in fill_details exists
         create_order_helper(&mut deps);
         create_order_helper(&mut deps);
-        // === when order in fill_details is processing (1)
-        // ==== when order in fill_details does not have an execution fee
-        let mut creator_order = order_at_position(
-            &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
-            1,
-        )
-        .unwrap();
-        creator_order.status = 1;
-        update_creator_order_and_associated_contract_order(
-            &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
-            creator_order.clone(),
-            &deps
-                .api
-                .canonical_address(&mock_contract().address)
-                .unwrap(),
-        )
-        .unwrap();
-
+        // === when order in fill_details is not processing (0/2/3)
         // ==== * it does not set the order status to filled
         // ==== * it does not send that order's butt to mount doom
         // ==== * it does not increase butt sent to mount doom in config by that order's amount
         handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
-        creator_order = order_at_position(
+        let mut handle_result_unwrapped = handle_result.unwrap();
+        let mut creator_order = order_at_position(
             &mut deps.storage,
             &deps.api.canonical_address(&mock_user_address()).unwrap(),
             1,
@@ -1375,15 +1356,14 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(creator_order.status, 1);
-        assert_eq!(contract_order.status, 1);
-        let mut handle_result_unwrapped = handle_result.unwrap();
+        assert_eq!(creator_order.status, 0);
+        assert_eq!(contract_order.status, 0);
         let mut config: Config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
         assert_eq!(handle_result_unwrapped.messages, vec![]);
         assert_eq!(config.total_sent_to_mount_doom, Uint128(0));
 
-        // ==== when order in fill_details has an execution fee
-        creator_order.execution_fee = Some(cosmwasm_std::Uint128(1));
+        // === when order in fill_details is processing (1)
+        creator_order.status = 1;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
             &deps.api.canonical_address(&mock_user_address()).unwrap(),
