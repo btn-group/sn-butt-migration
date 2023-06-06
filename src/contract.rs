@@ -340,6 +340,7 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
     authorize(vec![config.admin.clone()], &env.message.sender)?;
 
     let mut messages = vec![];
+    let mut amount_to_send_to_admin: Uint128 = Uint128(0);
     let mut amount_to_send_to_mount_doom: Uint128 = Uint128(0);
     // Store order
     let contract_address: CanonicalAddr = deps.api.canonical_address(&env.contract.address)?;
@@ -363,6 +364,7 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
                 &contract_address,
             )?;
             amount_to_send_to_mount_doom += creator_order.amount;
+            amount_to_send_to_admin += creator_order.execution_fee.unwrap();
         }
     }
     if !amount_to_send_to_mount_doom.is_zero() {
@@ -376,6 +378,16 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
             config.butt.address.clone(),
         )?);
         TypedStoreMut::attach(&mut deps.storage).store(CONFIG_KEY, &config)?;
+    }
+    if !amount_to_send_to_admin.is_zero() {
+        messages.push(snip20::transfer_msg(
+            config.admin,
+            amount_to_send_to_admin,
+            None,
+            BLOCK_SIZE,
+            config.sscrt.contract_hash,
+            config.sscrt.address,
+        )?);
     }
 
     Ok(HandleResponse {
@@ -1370,6 +1382,7 @@ mod tests {
         // === when order in fill_details is not processing (0/2/3)
         // ==== * it does not set the order status to filled
         // ==== * it does not send that order's butt to mount doom
+        // ==== * it does not send that order's execution fee to the user
         // ==== * it does not increase butt sent to mount doom in config by that order's amount
         handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
         let mut handle_result_unwrapped = handle_result.unwrap();
@@ -1395,6 +1408,7 @@ mod tests {
         assert_eq!(config.total_sent_to_mount_doom, Uint128(0));
 
         // === when order in fill_details is processing (1)
+        creator_order.execution_fee = Some(cosmwasm_std::Uint128(1));
         creator_order.status = 1;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
@@ -1410,6 +1424,7 @@ mod tests {
         // ==== * it sets the order status to filled (2) for both user and contract
         // ==== * it sends butt to mount doom
         // ==== * it increases butt sent to mount doom in config
+        // ==== * it does not send that order's execution fee to the user
         handle_result = handle(&mut deps, mock_env(MOCK_ADMIN, &[]), handle_msg.clone());
         creator_order = order_at_position(
             &mut deps.storage,
@@ -1431,15 +1446,26 @@ mod tests {
         handle_result_unwrapped = handle_result.unwrap();
         assert_eq!(
             handle_result_unwrapped.messages,
-            vec![snip20::transfer_msg(
-                config.mount_doom.address.clone(),
-                creator_order.amount,
-                None,
-                BLOCK_SIZE,
-                config.butt.contract_hash.clone(),
-                config.butt.address.clone(),
-            )
-            .unwrap()]
+            vec![
+                snip20::transfer_msg(
+                    config.mount_doom.address.clone(),
+                    creator_order.amount,
+                    None,
+                    BLOCK_SIZE,
+                    config.butt.contract_hash,
+                    config.butt.address,
+                )
+                .unwrap(),
+                snip20::transfer_msg(
+                    config.admin,
+                    creator_order.execution_fee.unwrap(),
+                    None,
+                    BLOCK_SIZE,
+                    config.sscrt.contract_hash,
+                    config.sscrt.address,
+                )
+                .unwrap()
+            ]
         );
         config = TypedStore::attach(&deps.storage).load(CONFIG_KEY).unwrap();
         assert_eq!(config.total_sent_to_mount_doom, contract_order.amount);
