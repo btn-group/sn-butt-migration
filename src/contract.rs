@@ -271,7 +271,7 @@ fn change_orders_to_processing<S: Storage, A: Api, Q: Querier>(
             creator_order.status = 1;
             update_creator_order_and_associated_contract_order(
                 &mut deps.storage,
-                creator_order.clone(),
+                creator_order,
                 &contract_address,
             )?;
         }
@@ -365,6 +365,7 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
     }
     if !amount_to_send_to_mount_doom.is_zero() {
         config.total_sent_to_mount_doom += amount_to_send_to_mount_doom;
+        TypedStoreMut::attach(&mut deps.storage).store(CONFIG_KEY, &config)?;
         messages.push(snip20::transfer_msg(
             config.mount_doom.address.clone(),
             amount_to_send_to_mount_doom,
@@ -373,7 +374,6 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
             config.butt.contract_hash.clone(),
             config.butt.address.clone(),
         )?);
-        TypedStoreMut::attach(&mut deps.storage).store(CONFIG_KEY, &config)?;
     }
     if !amount_to_send_to_admin.is_zero() {
         messages.push(snip20::transfer_msg(
