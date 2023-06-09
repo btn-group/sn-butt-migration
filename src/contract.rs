@@ -150,7 +150,6 @@ fn set_execution_fee_for_order<S: Storage, A: Api, Q: Querier>(
     creator_order.execution_fee = Some(amount);
     update_creator_order_and_associated_contract_order(
         &mut deps.storage,
-        &user_canonical_address,
         creator_order.clone(),
         &contract_canonical_address,
     )?;
@@ -208,7 +207,7 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
     )?;
     if creator_order.status != 0 {
         return Err(StdError::generic_err(
-            "Order is already filled or cancelled.",
+            "Order can only be cancelled if open.",
         ));
     }
 
@@ -228,7 +227,6 @@ fn cancel_order<S: Storage, A: Api, Q: Querier>(
     creator_order.status = 3;
     update_creator_order_and_associated_contract_order(
         &mut deps.storage,
-        &creator_order.creator,
         creator_order.clone(),
         &contract_canonical_address,
     )?;
@@ -273,7 +271,6 @@ fn change_orders_to_processing<S: Storage, A: Api, Q: Querier>(
             creator_order.status = 1;
             update_creator_order_and_associated_contract_order(
                 &mut deps.storage,
-                &creator_order.creator,
                 creator_order.clone(),
                 &contract_address,
             )?;
@@ -359,7 +356,6 @@ fn fill_orders<S: Storage, A: Api, Q: Querier>(
             creator_order.azero_transaction_hash = Some(fill_detail.azero_transaction_hash.clone());
             update_creator_order_and_associated_contract_order(
                 &mut deps.storage,
-                &creator_order.creator,
                 creator_order.clone(),
                 &contract_address,
             )?;
@@ -645,12 +641,11 @@ fn update_config<S: Storage, A: Api, Q: Querier>(
 
 fn update_creator_order_and_associated_contract_order<S: Storage>(
     store: &mut S,
-    user_address: &CanonicalAddr,
     creator_order: Order,
     contract_address: &CanonicalAddr,
 ) -> StdResult<()> {
     let mut user_store =
-        PrefixedStorage::multilevel(&[PREFIX_ORDERS, user_address.as_slice()], store);
+        PrefixedStorage::multilevel(&[PREFIX_ORDERS, creator_order.creator.as_slice()], store);
     // Try to access the storage of orders for the account.
     // If it doesn't exist yet, return an empty list of transfers.
     let mut user_store = TypedStoreMut::<Order, _, _>::attach(&mut user_store);
@@ -830,7 +825,6 @@ mod tests {
         creator_order.execution_fee = Some(cosmwasm_std::Uint128(1));
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
@@ -915,7 +909,6 @@ mod tests {
         creator_order.execution_fee = Some(Uint128(1));
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
@@ -941,7 +934,6 @@ mod tests {
         creator_order.status = 3;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
@@ -959,7 +951,6 @@ mod tests {
         creator_order.status = 2;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
@@ -977,7 +968,6 @@ mod tests {
         creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
@@ -1029,7 +1019,6 @@ mod tests {
         creator_order.created_at_block_height = 1;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
@@ -1082,7 +1071,6 @@ mod tests {
         creator_order.status = 3;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &creator_order.creator,
             creator_order.clone(),
             &deps
                 .api
@@ -1094,13 +1082,12 @@ mod tests {
         handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("Order is already filled or cancelled.")
+            StdError::generic_err("Order can only be cancelled if open.")
         );
         // === when order is filled
         creator_order.status = 2;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &creator_order.creator,
             creator_order.clone(),
             &deps
                 .api
@@ -1112,13 +1099,12 @@ mod tests {
         handle_result = handle(&mut deps, env.clone(), handle_msg.clone());
         assert_eq!(
             handle_result.unwrap_err(),
-            StdError::generic_err("Order is already filled or cancelled.")
+            StdError::generic_err("Order can only be cancelled if open.")
         );
         // === when order can be cancelled
         creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &creator_order.creator,
             creator_order.clone(),
             &deps
                 .api
@@ -1185,7 +1171,6 @@ mod tests {
         creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &creator_order.creator,
             creator_order.clone(),
             &deps
                 .api
@@ -1197,7 +1182,6 @@ mod tests {
         creator_order.status = 0;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &creator_order.creator,
             creator_order.clone(),
             &deps
                 .api
@@ -1412,7 +1396,6 @@ mod tests {
         creator_order.status = 1;
         update_creator_order_and_associated_contract_order(
             &mut deps.storage,
-            &deps.api.canonical_address(&mock_user_address()).unwrap(),
             creator_order.clone(),
             &deps
                 .api
